@@ -43,6 +43,33 @@ class Settings(BaseSettings):
     # Public origin of the web app: links in agent (MCP) results point here.
     PUBLIC_APP_URL: str = "https://prumoai.vercel.app"
 
+    # Public origin of this API (scheme://host[:port]). Setting it turns OAuth for
+    # /mcp ON; unset or empty keeps it OFF (fail closed, ADR 0022).
+    PUBLIC_API_URL: str | None = None
+
+    @property
+    def oauth_enabled(self) -> bool:
+        return bool((self.PUBLIC_API_URL or "").strip())
+
+    @property
+    def public_api_url(self) -> str:
+        """``PUBLIC_API_URL`` without a trailing slash; raises when OAuth is off."""
+        if not self.oauth_enabled:
+            raise RuntimeError("PUBLIC_API_URL is unset: OAuth for /mcp is off")
+        return (self.PUBLIC_API_URL or "").strip().rstrip("/")
+
+    @property
+    def mcp_resource_url(self) -> str:
+        return self.public_api_url + "/mcp"
+
+    # Comma-separated OAuth redirect URIs a client may register (exact match);
+    # loopback http URIs are always allowed (ADR 0022).
+    MCP_OAUTH_REDIRECT_URIS: str = "https://claude.ai/api/mcp/auth_callback"
+
+    @property
+    def mcp_oauth_redirect_uris_list(self) -> list[str]:
+        return [u.strip() for u in self.MCP_OAUTH_REDIRECT_URIS.split(",") if u.strip()]
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Return the CORS allow-list with a safe development fallback."""

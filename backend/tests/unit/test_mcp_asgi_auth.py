@@ -535,3 +535,60 @@ async def test_a_healthy_dispatch_passes_the_response_through(
 
     assert sent[0]["status"] == 200
     assert sent[1]["body"] == b"ok"
+
+
+_PRM_URL = "http://localhost:8000/.well-known/oauth-protected-resource/mcp"
+
+
+@pytest.mark.parametrize("presented", [False, True], ids=["absent", "presented"])
+def test_challenge_is_plain_bearer_with_oauth_off(
+    monkeypatch: pytest.MonkeyPatch, presented: bool
+) -> None:
+    monkeypatch.setattr(asgi_auth.settings, "PUBLIC_API_URL", None)
+    assert asgi_auth._challenge(presented=presented) == "Bearer"
+
+
+@pytest.mark.parametrize(
+    ("presented", "expected"),
+    [
+        (False, f'Bearer resource_metadata="{_PRM_URL}"'),
+        (True, f'Bearer error="invalid_token", resource_metadata="{_PRM_URL}"'),
+    ],
+    ids=["absent", "presented"],
+)
+def test_challenge_points_at_the_prm_with_oauth_on(
+    monkeypatch: pytest.MonkeyPatch, presented: bool, expected: str
+) -> None:
+    monkeypatch.setattr(asgi_auth.settings, "PUBLIC_API_URL", "http://localhost:8000")
+    assert asgi_auth._challenge(presented=presented) == expected
+
+
+_OAT = "prumo_oat_" + "a" * 43
+_PAT = "prumo_pat_" + "a" * 43
+
+
+@pytest.mark.parametrize(
+    ("public_api_url", "secret", "oauth_called"),
+    [
+        ("http://localhost:8000", _OAT, True),
+        (None, _OAT, False),
+        ("http://localhost:8000", _PAT, False),
+    ],
+    ids=["oauth-on-oat", "oauth-off-oat", "oauth-on-pat"],
+)
+async def test_resolve_dispatches_by_prefix_and_oauth_mode(
+    monkeypatch: pytest.MonkeyPatch, public_api_url: str | None, secret: str, oauth_called: bool
+) -> None:
+    monkeypatch.setattr(asgi_auth.settings, "PUBLIC_API_URL", public_api_url)
+    oauth = AsyncMock(return_value=PRINCIPAL)
+    pat = AsyncMock(return_value=None)
+    monkeypatch.setattr(asgi_auth.mcp_oauth_service, "resolve_principal", oauth)
+    monkeypatch.setattr(asgi_auth, "resolve_principal", pat)
+    db = SimpleNamespace()
+
+    got = await asgi_auth._resolve(db, secret)  # type: ignore[arg-type]
+
+    called, idle = (oauth, pat) if oauth_called else (pat, oauth)
+    called.assert_awaited_once_with(db, secret)
+    idle.assert_not_awaited()
+    assert got is (PRINCIPAL if oauth_called else None)

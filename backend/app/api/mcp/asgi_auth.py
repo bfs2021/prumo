@@ -1,7 +1,10 @@
-"""PAT bearer auth for the exact ``/mcp`` route (spec §3, §7).
+"""Bearer auth for the exact ``/mcp`` route: a PAT, or with OAuth on a
+prumo-issued OAuth access token (spec §3, §7, ADR 0022).
 
 Pure ASGI, not the SDK ``token_verifier`` — that forces OAuth
-``resource_metadata`` 401s, which a PAT bearer is not. ``_PatAuthApp`` is a
+``resource_metadata`` 401s unconditionally. Here the 401 is a plain ``Bearer``
+challenge with OAuth off, and carries ``resource_metadata`` (the RFC 9728
+document's URL) only when OAuth is on (ADR 0022). ``_PatAuthApp`` is a
 class, not a closure: Starlette's ``Route`` runs a plain-function endpoint
 as a request -> response handler, but a class instance is called as a raw
 ASGI app — which is what the SDK's streamable-http app (a stateful,
@@ -18,13 +21,17 @@ from limits import parse
 from starlette.responses import Response
 
 from app.api.mcp import session as mcp_session
+from app.api.mcp.oauth.routes import resource_metadata_url
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.schemas.mcp_auth import McpPrincipal
+from app.services import mcp_oauth_service
+from app.services.mcp_oauth_service import ACCESS_PREFIX
 from app.services.pat_service import hash_secret, resolve_principal, touch_last_used
-from app.utils.rate_limiter import hit_shared
+from app.utils.rate_limiter import client_ip, hit_shared
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = get_logger(__name__)
@@ -64,6 +71,14 @@ def _bearer(scope: Scope) -> str | None:
     return secret or None
 
 
+async def _resolve(db: AsyncSession, secret: str) -> McpPrincipal | None:
+    """The principal for ``secret``: an OAuth access token only while OAuth is
+    on; anything else goes to the PAT lookup, which refuses a non-PAT secret."""
+    if settings.oauth_enabled and secret.startswith(ACCESS_PREFIX):
+        return await mcp_oauth_service.resolve_principal(db, secret)
+    return await resolve_principal(db, secret)
+
+
 class _PatAuthApp:
     """A class, not a closure: Starlette's Route runs a plain-function endpoint as
     request -> response; a class instance is called as a raw ASGI app.
@@ -84,7 +99,7 @@ class _PatAuthApp:
 
         secret = _bearer(scope)
         if not secret:
-            await _unauthorized(scope, receive, send)
+            await _unauthorized(scope, receive, send, presented=False)
             return
 
         # Keyed by a prefix of the token's stored hash (never the secret) and
@@ -106,7 +121,7 @@ class _PatAuthApp:
     async def _serve(self, secret: str, scope: Scope, receive: Receive, send: Send) -> None:
         async with mcp_session.request_session() as db:
             try:
-                principal = await resolve_principal(db, secret)
+                principal = await _resolve(db, secret)
             except Exception as exc:
                 # Only "no usable connection" is a 503; any other lookup failure
                 # is a bug and propagates as a 500 with its traceback.
@@ -117,7 +132,7 @@ class _PatAuthApp:
                 return
 
             if principal is None:
-                await _unauthorized(scope, receive, send)
+                await _unauthorized(scope, receive, send, presented=True)
                 return
 
             try:
@@ -159,13 +174,18 @@ async def _service_unavailable(scope: Scope, receive: Receive, send: Send) -> No
     await Response(status_code=503, headers={"Retry-After": "2"})(scope, receive, send)
 
 
-async def _unauthorized(scope: Scope, receive: Receive, send: Send) -> None:
-    client = scope.get("client")
-    ip = client[0] if client else "unknown"
+def _challenge(*, presented: bool) -> str:
+    if not settings.oauth_enabled:
+        return "Bearer"
+    meta = f'resource_metadata="{resource_metadata_url()}"'
+    return f'Bearer error="invalid_token", {meta}' if presented else f"Bearer {meta}"
+
+
+async def _unauthorized(scope: Scope, receive: Receive, send: Send, *, presented: bool) -> None:
     # Only a failed lookup hits the per-IP bucket: a valid PAT never counts.
-    ok = hit_shared(_UNAUTH_LIMIT, "mcp401", ip)
+    ok = hit_shared(_UNAUTH_LIMIT, "mcp401", client_ip(scope))
     response = (
-        Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
+        Response(status_code=401, headers={"WWW-Authenticate": _challenge(presented=presented)})
         if ok
         else Response(status_code=429, headers={"Retry-After": "60"})
     )

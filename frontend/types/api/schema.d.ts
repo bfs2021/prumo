@@ -573,6 +573,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/oauth-connections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List My Connections */
+        get: operations["list_my_connections_api_v1_me_oauth_connections_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/oauth-connections/{connection_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke My Connection */
+        delete: operations["revoke_my_connection_api_v1_me_oauth_connections__connection_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/providers": {
         parameters: {
             query?: never;
@@ -620,6 +654,40 @@ export interface paths {
         post?: never;
         /** Revoke My Token */
         delete: operations["revoke_my_token_api_v1_me_tokens__token_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/oauth/requests/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Consent Request */
+        get: operations["read_consent_request_api_v1_oauth_requests__request_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/oauth/requests/{request_id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Decide Consent Request */
+        post: operations["decide_consent_request_api_v1_oauth_requests__request_id__decision_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2436,6 +2504,57 @@ export interface components {
              */
             trace_id?: string | null;
         };
+        /** ApiResponse[OAuthConnectionRead] */
+        ApiResponse_OAuthConnectionRead_: {
+            /** @description Dados da resposta */
+            data?: components["schemas"]["OAuthConnectionRead"] | null;
+            /** @description Error details */
+            error?: components["schemas"]["ErrorDetail"] | null;
+            /**
+             * Ok
+             * @description Indica se a operacao foi bem-sucedida
+             */
+            ok: boolean;
+            /**
+             * Trace Id
+             * @description rastreamento
+             */
+            trace_id?: string | null;
+        };
+        /** ApiResponse[OAuthConsentDecisionRead] */
+        ApiResponse_OAuthConsentDecisionRead_: {
+            /** @description Dados da resposta */
+            data?: components["schemas"]["OAuthConsentDecisionRead"] | null;
+            /** @description Error details */
+            error?: components["schemas"]["ErrorDetail"] | null;
+            /**
+             * Ok
+             * @description Indica se a operacao foi bem-sucedida
+             */
+            ok: boolean;
+            /**
+             * Trace Id
+             * @description rastreamento
+             */
+            trace_id?: string | null;
+        };
+        /** ApiResponse[OAuthConsentRequestRead] */
+        ApiResponse_OAuthConsentRequestRead_: {
+            /** @description Dados da resposta */
+            data?: components["schemas"]["OAuthConsentRequestRead"] | null;
+            /** @description Error details */
+            error?: components["schemas"]["ErrorDetail"] | null;
+            /**
+             * Ok
+             * @description Indica se a operacao foi bem-sucedida
+             */
+            ok: boolean;
+            /**
+             * Trace Id
+             * @description rastreamento
+             */
+            trace_id?: string | null;
+        };
         /** ApiResponse[OpenHITLSessionResponse] */
         ApiResponse_OpenHITLSessionResponse_: {
             /** @description Dados da resposta */
@@ -3141,6 +3260,26 @@ export interface components {
              * @description Dados da resposta
              */
             data?: components["schemas"]["LlmConnectionRead"][] | null;
+            /** @description Error details */
+            error?: components["schemas"]["ErrorDetail"] | null;
+            /**
+             * Ok
+             * @description Indica se a operacao foi bem-sucedida
+             */
+            ok: boolean;
+            /**
+             * Trace Id
+             * @description rastreamento
+             */
+            trace_id?: string | null;
+        };
+        /** ApiResponse[list[OAuthConnectionRead]] */
+        ApiResponse_list_OAuthConnectionRead__: {
+            /**
+             * Data
+             * @description Dados da resposta
+             */
+            data?: components["schemas"]["OAuthConnectionRead"][] | null;
             /** @description Error details */
             error?: components["schemas"]["ErrorDetail"] | null;
             /**
@@ -4793,6 +4932,140 @@ export interface components {
              * @default true
              */
             ready: boolean;
+        };
+        /**
+         * OAuthConnectionRead
+         * @description An app the user connected through OAuth; never carries a token.
+         */
+        OAuthConnectionRead: {
+            /**
+             * Client Name
+             * @description The name the app registered with.
+             */
+            client_name: string;
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the user approved the app.
+             */
+            created_at: string;
+            /**
+             * Expires At
+             * Format: date-time
+             * @description When the connection ends unless the user approves the app again.
+             */
+            expires_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Last Used At
+             * @description Last time the app called `/mcp`.
+             */
+            last_used_at: string | null;
+            /**
+             * Scope
+             * @description What the user granted the app.
+             * @enum {string}
+             */
+            scope: "read" | "read_write";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "expired" | "revoked";
+        };
+        /**
+         * OAuthConsentDecisionRead
+         * @description Where the browser goes next: back to the app, with a code or an error.
+         */
+        OAuthConsentDecisionRead: {
+            /**
+             * Redirect Url
+             * @description The app's redirect URI with the decision's query.
+             */
+            redirect_url: string;
+        };
+        /**
+         * OAuthConsentDecisionRequest
+         * @description Body of ``POST /api/v1/oauth/requests/{request_id}/decision``.
+         */
+        OAuthConsentDecisionRequest: {
+            /**
+             * Approve
+             * @description True to connect the app, false to deny it.
+             */
+            approve: boolean;
+            /**
+             * Write
+             * @description Grant `write` too. Ignored on a deny and on a request that did not ask for it.
+             */
+            write: boolean;
+        };
+        /**
+         * OAuthConsentRefusalCode
+         * @description Why a consent route refused.
+         *
+         *     409 ``REQUEST_ALREADY_DECIDED``: the request was already approved or
+         *     denied (in this tab, another tab, or by a concurrent approval for the same
+         *     app). Slice-local, like ``PersonalAccessTokenRefusalCode``.
+         * @enum {string}
+         */
+        OAuthConsentRefusalCode: "REQUEST_ALREADY_DECIDED";
+        /** OAuthConsentRefusalError */
+        OAuthConsentRefusalError: {
+            code: components["schemas"]["OAuthConsentRefusalCode"];
+            /** Message */
+            message: string;
+        };
+        /**
+         * OAuthConsentRefusalResponse
+         * @description The 409 (``REQUEST_ALREADY_DECIDED``) body, declared so the generated
+         *     client types the refusal.
+         */
+        OAuthConsentRefusalResponse: {
+            error: components["schemas"]["OAuthConsentRefusalError"];
+            /**
+             * Ok
+             * @default false
+             */
+            ok: boolean;
+            /** Trace Id */
+            trace_id?: string | null;
+        };
+        /**
+         * OAuthConsentRequestRead
+         * @description A pending authorization request, as the consent page shows it.
+         */
+        OAuthConsentRequestRead: {
+            /**
+             * Client Name
+             * @description The name the app registered with.
+             */
+            client_name: string;
+            /**
+             * Expires At
+             * Format: date-time
+             * @description When the request stops accepting a decision.
+             */
+            expires_at: string;
+            /**
+             * Offers Write
+             * @description True when the app asked for `write`, so the page may offer it.
+             */
+            offers_write: boolean;
+            /**
+             * Redirect Host
+             * @description Host (and port, when present) the app's redirect URI points at.
+             */
+            redirect_host: string;
+            /**
+             * Requested Scopes
+             * @description The scopes the app asked for; always includes `read`.
+             */
+            requested_scopes: string[];
         };
         /**
          * OpaqueValueState
@@ -8261,6 +8534,78 @@ export interface operations {
             };
         };
     };
+    list_my_connections_api_v1_me_oauth_connections_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_list_OAuthConnectionRead__"];
+                };
+            };
+            /** @description Missing or invalid Supabase session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revoke_my_connection_api_v1_me_oauth_connections__connection_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_OAuthConnectionRead_"];
+                };
+            };
+            /** @description Missing or invalid Supabase session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Connection not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_providers_api_v1_me_providers_get: {
         parameters: {
             query?: never;
@@ -8399,6 +8744,128 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    read_consent_request_api_v1_oauth_requests__request_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_OAuthConsentRequestRead_"];
+                };
+            };
+            /** @description Missing or invalid Supabase session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown or expired request, or OAuth is off */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused: the request was already answered */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthConsentRefusalResponse"];
+                };
+            };
+            /** @description Malformed request id */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    decide_consent_request_api_v1_oauth_requests__request_id__decision_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OAuthConsentDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_OAuthConsentDecisionRead_"];
+                };
+            };
+            /** @description Missing or invalid Supabase session */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown or expired request, or OAuth is off */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused: the request was already answered */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthConsentRefusalResponse"];
+                };
+            };
+            /** @description Malformed request id or body */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
