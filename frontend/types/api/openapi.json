@@ -1372,6 +1372,48 @@
         "title": "ApiResponse[ManagerReviewVisibilityRead]",
         "type": "object"
       },
+      "ApiResponse_NoneType_": {
+        "properties": {
+          "data": {
+            "description": "Dados da resposta",
+            "title": "Data",
+            "type": "null"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Error details"
+          },
+          "ok": {
+            "description": "Indica se a operacao foi bem-sucedida",
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "rastreamento",
+            "title": "Trace Id"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "ApiResponse[NoneType]",
+        "type": "object"
+      },
       "ApiResponse_OpenHITLSessionResponse_": {
         "properties": {
           "data": {
@@ -5397,7 +5439,7 @@
         "type": "object"
       },
       "ExtractionErrorCode": {
-        "description": "Stable code for a terminal extraction failure, or for a typed\nsynchronous refusal on the extraction write paths.\n\nCarried on ``ExtractionJobStatusResponse.error_code`` so the frontend can\npick specific, actionable toast copy without parsing the human ``error``\nstring. Only modes the backend genuinely raises are represented \u2014 each\nvalue has a real emitter in ``classify_extraction_error``:\n\n- ``PDF_NOT_FOUND``    \u2014 the article has no stored PDF (``FileNotFoundError``).\n- ``MISSING_API_KEY``  \u2014 no usable LLM key, BYOK or global (``MissingLLMKeyError``).\n- ``ENGINE_RETIRED``   \u2014 the project's stored engine left the catalogue\n  mid-flight (``EngineRetiredError``; enqueue-time validation is a 409),\n  or its provider retired the model upstream (``ModelHTTPError`` 410).\n- ``LLM_ENDPOINT_UNAVAILABLE`` \u2014 the engine's custom endpoint cannot\n  serve: row deleted, unverified, model dropped\n  (``resolve_engine``), or its key no longer decrypts\n  (``EndpointUnavailableError``; enqueue-time validation is a 409).\n- ``MISSING_ENTITY_KEY`` \u2014 a repeating section declares no\n  ``is_entity_key`` field (``MissingEntityKeyError``), refused before any\n  LLM call. Carried by the single-section job and, as a 409, by the sync\n  models kickoff; a batch run keeps reporting per-section text.\n- ``ENTRY_KEY_DUPLICATE`` \u2014 manual entry creation named an identity the\n  coordinate already holds (``EntryKeyDuplicateError``), refused as a 409\n  rather than silently renaming the entry the way the retired model path\n  did (\"Cox Model (2)\").\n- ``RUN_BUSY``         \u2014 the coordinate's live run is in consensus, which\n  accepts no new AI proposals (``RunWriteError.run_busy``; enqueue-time\n  refusal is a 409 ``RunBusyError``), e.g. the run reached consensus\n  while the job was queued.\n- ``EXTRACTION_FAILED``\u2014 generic catch-all for everything else.",
+        "description": "Stable code for a terminal extraction failure, or for a typed\nsynchronous refusal on the extraction write paths.\n\nCarried on ``ExtractionJobStatusResponse.error_code`` so the frontend can\npick specific, actionable toast copy without parsing the human ``error``\nstring. Only modes the backend genuinely raises are represented \u2014 each\nvalue has a real emitter in ``classify_extraction_error``:\n\n- ``PDF_NOT_FOUND``    \u2014 the article has no stored PDF (``FileNotFoundError``).\n- ``MISSING_API_KEY``  \u2014 no usable LLM key, BYOK or global (``MissingLLMKeyError``).\n- ``ENGINE_RETIRED``   \u2014 the project's stored engine left the catalogue\n  mid-flight (``EngineRetiredError``; enqueue-time validation is a 409),\n  or its provider retired the model upstream (``ModelHTTPError`` 410).\n- ``LLM_ENDPOINT_UNAVAILABLE`` \u2014 the engine's custom endpoint cannot\n  serve: row deleted, unverified, model dropped\n  (``resolve_engine``), or its key no longer decrypts\n  (``EndpointUnavailableError``; enqueue-time validation is a 409).\n- ``MISSING_ENTITY_KEY`` \u2014 a repeating section declares no\n  ``is_entity_key`` field (``MissingEntityKeyError``), refused before any\n  LLM call. Carried by the single-section job and, as a 409, by the sync\n  models kickoff; a batch run keeps reporting per-section text.\n- ``ENTRY_KEY_DUPLICATE`` \u2014 manual entry creation named an identity the\n  coordinate already holds (``EntryKeyDuplicateError``), refused as a 409\n  rather than silently renaming the entry the way the retired model path\n  did (\"Cox Model (2)\").\n- ``RUN_BUSY``         \u2014 the coordinate's live run is in consensus, which\n  accepts no new AI proposals (``RunWriteError.run_busy``; enqueue-time\n  refusal is a 409 ``RunBusyError``), e.g. the run reached consensus\n  while the job was queued.\n- ``RUN_FINALIZED``    \u2014 the coordinate's run is finalized; AI extraction\n  waits until it is reopened (``RunWriteError.run_finalized``;\n  enqueue-time refusal is a 409 ``RunFinalizedError``), e.g. the run was\n  finalized while the job was queued.\n- ``EXTRACTION_FAILED``\u2014 generic catch-all for everything else.",
         "enum": [
           "PDF_NOT_FOUND",
           "MISSING_API_KEY",
@@ -5406,6 +5448,7 @@
           "MISSING_ENTITY_KEY",
           "ENTRY_KEY_DUPLICATE",
           "RUN_BUSY",
+          "RUN_FINALIZED",
           "EXTRACTION_FAILED"
         ],
         "title": "ExtractionErrorCode",
@@ -7044,6 +7087,24 @@
             "title": "Name",
             "type": "string"
           },
+          "project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 20,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Projects the token may reach (1-20 distinct ids, each one the caller belongs to). Omit or null for every project of the caller.",
+            "title": "Project Ids"
+          },
           "scope": {
             "description": "Which MCP tool tier the token may call.",
             "enum": [
@@ -7115,6 +7176,22 @@
             "title": "Name",
             "type": "string"
           },
+          "project_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Projects the token is restricted to; null means every project of its user.",
+            "title": "Project Ids"
+          },
           "revoked_at": {
             "anyOf": [
               {
@@ -7156,6 +7233,7 @@
           "token_prefix",
           "scope",
           "status",
+          "project_ids",
           "expires_at",
           "last_used_at",
           "revoked_at",
@@ -7165,9 +7243,10 @@
         "type": "object"
       },
       "PersonalAccessTokenRefusalCode": {
-        "description": "Why ``POST /api/v1/me/tokens`` returned 409.\n\nSlice-local, like ``TemplateDraftLockRefusalCode``\n(``app/schemas/hitl_session.py``): one endpoint's outcome, not part of\nthe cross-cutting ``ApiErrorCode`` vocabulary.",
+        "description": "Why ``POST /api/v1/me/tokens`` refused.\n\n409 ``TOKEN_LIMIT_REACHED``: the caller already holds the maximum number of\nactive tokens. 422 ``PROJECT_NOT_ACCESSIBLE``: a listed project is missing\nor the caller is not a member of it (one answer for both).\n\nSlice-local, like ``TemplateDraftLockRefusalCode``\n(``app/schemas/hitl_session.py``): one endpoint's outcome, not part of\nthe cross-cutting ``ApiErrorCode`` vocabulary.",
         "enum": [
-          "TOKEN_LIMIT_REACHED"
+          "TOKEN_LIMIT_REACHED",
+          "PROJECT_NOT_ACCESSIBLE"
         ],
         "title": "PersonalAccessTokenRefusalCode",
         "type": "string"
@@ -7190,7 +7269,7 @@
         "type": "object"
       },
       "PersonalAccessTokenRefusalResponse": {
-        "description": "The 409 body, declared so the generated client types the refusal.",
+        "description": "The 409 (``TOKEN_LIMIT_REACHED``) and 422 (``PROJECT_NOT_ACCESSIBLE``)\nbody, declared so the generated client types the refusal.",
         "properties": {
           "error": {
             "$ref": "#/components/schemas/PersonalAccessTokenRefusalError"
@@ -9683,17 +9762,6 @@
               }
             ],
             "title": "Parentinstanceid"
-          },
-          "pdfText": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pdftext"
           },
           "projectId": {
             "format": "uuid",
@@ -13903,7 +13971,22 @@
             "description": "Refused: 10 active tokens is the limit"
           },
           "422": {
-            "description": "Invalid name, scope or expires_in_days"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PersonalAccessTokenRefusalResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApiResponse_NoneType_"
+                    }
+                  ],
+                  "title": "Response 422 Create My Token Api V1 Me Tokens Post"
+                }
+              }
+            },
+            "description": "Invalid body, or a listed project the caller cannot reach"
           }
         },
         "security": [

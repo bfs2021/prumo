@@ -9,6 +9,7 @@ must roll back atomically on every refusal.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,14 +19,18 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.mcp import session as mcp_session
+from app.api.mcp.draft_diff import DIFF_ROW_CAP
 from app.api.mcp.tools import template_draft as template_draft_tool
+from app.core.config import settings
 from app.schemas.personal_access_token import PersonalAccessTokenCreateRequest
 from app.services import template_field_naming, template_field_service
 from app.services.pat_service import create_token, resolve_principal
+from app.utils.compact_json import RESULT_CAP, compact_json
 from tests.integration.conftest import SEED, clean_project_clones
 from tests.integration.helpers.template_fixtures import (
     ARTICLE_ID,
     add_field,
+    add_section,
     draft_lock_holder,
     fresh_charms,
 )
@@ -74,8 +79,9 @@ async def _audit_count(db: AsyncSession, *, outcome: str) -> int:
 
 
 async def test_success_returns_unpublished_draft(
-    mcp_client, pat_primary_rw, db_session: AsyncSession
+    mcp_client, pat_primary_rw, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(settings, "PUBLIC_APP_URL", "https://example.test/")
     project_id, template_id, schema = await fresh_charms(db_session)
     section_id, field_id = _section_and_field(schema)
     old_label = _label_of(schema, section_id, field_id)
@@ -103,10 +109,21 @@ async def test_success_returns_unpublished_draft(
     assert [a["op_index"] for a in body["applied"]] == [0, 1]
     assert body["applied"][0]["name"] == "follow_up_months"
     assert body["diff"]["status"] == "available"
-    assert (
-        body["editor_path"] == f"/projects/{project_id}?tab=extraction&extractionTab=configuration"
+    assert body["editor_url"] == (
+        f"https://example.test/projects/{project_id}?tab=extraction&extractionTab=configuration"
     )
+    assert "editor_path" not in body
+    assert body["draft_fingerprint"]
+    assert body["diff"]["changes_truncated"] is False
     assert "Publish" in body["next_step"]
+    assert body["untrusted_content"] is True
+    assert set(body["untrusted_fields"]) == {
+        "applied[].name",
+        "applied[].label",
+        "diff.changes[].label_path[]",
+        "diff.changes[].before",
+        "diff.changes[].after",
+    }
 
     row = (
         await db_session.execute(
@@ -223,6 +240,8 @@ async def test_draft_lock_held(mcp_client, pat_primary_rw, db_session: AsyncSess
     payload = error_payload(result)
     assert payload["code"] == "DRAFT_LOCK_HELD"
     assert payload["holder_name"] == "Integration Reviewer"
+    assert payload["untrusted_content"] is True
+    assert payload["untrusted_fields"] == ["holder_name"]
     assert await draft_lock_holder(db_session, template_id) == SEED.reviewer_profile
     assert await _label_set(db_session, template_id) == before
     assert await _audit_count(db_session, outcome="refused") == 1
@@ -262,6 +281,17 @@ async def test_disallowed_op_refused(
     payload = error_payload(result)
     assert payload["code"] == "OP_NOT_ALLOWED_VIA_AGENT"
     assert payload["op_index"] == 1
+    assert payload["allowed_ops"] == ["add_question", "update_question"]
+    blocked_key = {"type", "options"} & bad.keys()
+    if blocked_key:
+        assert payload["field"] == blocked_key.pop()
+        assert payload["editable_fields"] == ["description", "instructions", "label"]
+        assert "update_question" in payload["next_step"]
+        assert "prumo UI" in payload["next_step"]
+    else:
+        assert payload["next_step"] == "do this in the prumo UI"
+        assert "field" not in payload
+        assert "editable_fields" not in payload
     assert await _label_set(db_session, template_id) == before
     assert await draft_lock_holder(db_session, template_id) is None
     assert await _audit_count(db_session, outcome="refused") == 1
@@ -821,14 +851,89 @@ async def test_nul_in_an_op_string_is_invalid_argument(
 
 
 async def test_edit_template_draft_hints_are_pinned(mcp_client, pat_primary_rw) -> None:
-    """F17 (final review): a repeated call adds the question twice, so the
-    tool is destructive, NOT idempotent, and closed-world."""
+    """A repeated call adds the question twice, so the tool is NOT idempotent;
+    it only edits an unpublished draft, so it is non-destructive and closed-world."""
     async with mcp_client(pat_primary_rw) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
     a = tools["edit_template_draft"].annotations
     assert (a.read_only_hint, a.destructive_hint, a.idempotent_hint, a.open_world_hint) == (
         False,
-        True,
+        False,
         False,
         False,
     )
+
+
+async def test_large_draft_diff_is_capped_within_the_result_cap(
+    mcp_client, pat_primary_rw, db_session: AsyncSession
+) -> None:
+    project_id, template_id, schema = await fresh_charms(db_session)
+    section_id, _field_id = _section_and_field(schema)
+    for i in range(DIFF_ROW_CAP + 20):
+        await add_section(db_session, template_id, f"Pending-section-{i}-" + ("X" * 400))
+    await db_session.flush()
+
+    result = await call_tool(
+        mcp_client,
+        pat_primary_rw,
+        "edit_template_draft",
+        {
+            "project_id": str(project_id),
+            "template_id": str(template_id),
+            "ops": [{"op": "add_question", "section_id": section_id, "label": "Q", "type": "text"}],
+        },
+    )
+    body = structured(result)
+    assert body["diff"]["counts"]["additive"] > DIFF_ROW_CAP
+    assert len(body["diff"]["changes"]) == DIFF_ROW_CAP
+    assert body["diff"]["changes_truncated"] is True
+    assert body["draft_fingerprint"]
+    assert len(json.dumps(body)) <= 32_000
+
+
+async def test_non_ascii_draft_diff_stays_within_the_result_cap(
+    mcp_client, pat_primary_rw, db_session: AsyncSession
+) -> None:
+    # pt-BR text, rendered raw: 25 long added questions on top of long labels
+    # and descriptions overflow the diff's char budget before its row cap.
+    pt_br = "Descrição da intervenção: ação, avaliação e comparação. "
+    project_id, template_id, schema = await fresh_charms(db_session)
+    section_id, _field_id = _section_and_field(schema)
+    await db_session.execute(
+        text(
+            "UPDATE public.extraction_entity_types SET label = :l WHERE project_template_id = :tid"
+        ),
+        {"l": ("Seção de intervenção " * 10)[:200], "tid": str(template_id)},
+    )
+    await db_session.execute(
+        text(
+            "UPDATE public.extraction_fields f SET label = :l, llm_description = :d "
+            "FROM public.extraction_entity_types et "
+            "WHERE et.id = f.entity_type_id AND et.project_template_id = :tid"
+        ),
+        {"l": ("Pergunta sobre comparação " * 5)[:100], "d": pt_br * 17, "tid": str(template_id)},
+    )
+    await db_session.flush()
+
+    result = await call_tool(
+        mcp_client,
+        pat_primary_rw,
+        "edit_template_draft",
+        {
+            "project_id": str(project_id),
+            "template_id": str(template_id),
+            "ops": [
+                {
+                    "op": "add_question",
+                    "section_id": section_id,
+                    "label": f"Questão {i} " + "ç" * 80,
+                    "type": "text",
+                }
+                for i in range(25)
+            ],
+        },
+    )
+    body = structured(result)
+    assert body["diff"]["changes_truncated"] is True
+    assert body["diff"]["changes"]
+    assert len(compact_json(body)) <= RESULT_CAP

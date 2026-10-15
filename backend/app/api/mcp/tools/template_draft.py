@@ -13,18 +13,26 @@ before any audited code, so a foreign or missing template always answers
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError, WithJsonSchema
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.mcp.asgi_auth import current_principal
 from app.api.mcp.audit import AuditScope, record_applied_write, refuse
-from app.api.mcp.errors import NOT_FOUND_MESSAGE, McpErrorCode, McpToolError, reject_nul
+from app.api.mcp.draft_diff import capped_diff
+from app.api.mcp.errors import (
+    NOT_FOUND_MESSAGE,
+    McpErrorCode,
+    McpToolError,
+    reject_nul,
+    validation_failure,
+)
 from app.api.mcp.server import agent_tool
 from app.api.v1.endpoints._integrity import is_deadlock
+from app.core.config import settings
 from app.schemas.mcp_template_draft import (
     AddQuestionOp,
     AppliedQuestion,
@@ -53,6 +61,8 @@ from app.services.template_versioning import (
     NoActiveTemplateVersionError,
     get_template_config_diff,
 )
+from app.utils.compact_json import RESULT_CAP, compact_json
+from app.utils.json_schema import inline_json_schema
 
 _TOOL = "edit_template_draft"
 MAX_OPS = 25
@@ -60,19 +70,36 @@ _OPS: dict[str, type[AddQuestionOp] | type[UpdateQuestionOp]] = {
     "add_question": AddQuestionOp,
     "update_question": UpdateQuestionOp,
 }
+# Advertised only: `_parse_ops` still validates each op, so an empty list, too
+# many ops or a malformed op is an AUDITED refusal, not an SDK-level one.
+_OPS_SCHEMA = WithJsonSchema(
+    {
+        **inline_json_schema(list[Annotated[DraftOp, Field(discriminator="op")]]),
+        "maxItems": MAX_OPS,
+    }
+)
+_ALLOWED_OPS = sorted(_OPS)
+# update_question rewords only; a type or options change goes through the UI.
+_LOCKED_UPDATE_KEYS = frozenset({"type", "options"})
+_EDITABLE_UPDATE_FIELDS = sorted(UpdateQuestionOp.model_fields.keys() - {"op", "field_id"})
 _EDITOR_TAB = {
     "extraction": "tab=extraction&extractionTab=configuration",
     "quality_assessment": "tab=quality&qaTab=configuration",
 }
 _ROW_GUARDS = (SectionNotFoundError, EntityTypeNotFoundError, FieldNotFoundError)
 _NOT_ALLOWED_MESSAGE = "This op can only be done in the prumo UI."
+_LOCKED_KEY_MESSAGE = "A question's type or options can only be changed in the prumo UI."
+_LOCKED_KEY_NEXT_STEP = (
+    "resend update_question with only the editable_fields listed here; "
+    "change type or options in the prumo UI"
+)
 _NEXT_STEP = (
     "Saved as an unpublished draft. A manager must click Publish in prumo before "
     "reviewers or AI extraction see it."
 )
 _DESCRIPTION = (
     "Add a question to a section, or reword an existing one, in a project template's "
-    "unpublished draft (spec §5.2). Never report a question as live -- it stays invisible "
+    "unpublished draft. Never report a question as live -- it stays invisible "
     "to reviewers and to AI extraction until a project manager clicks Publish in prumo. "
     "After a RETRY or DUPLICATE_NAME error, call get_template before resending an "
     "add_question: it is not idempotent and may have partially applied. At most 25 ops "
@@ -85,11 +112,14 @@ _DESCRIPTION = (
     project_arg="project_id",
     title="Edit questionnaire draft",
     description=_DESCRIPTION,
-    destructive=True,
+    destructive=False,
     idempotent=False,
 )
 async def edit_template_draft(
-    db: AsyncSession, project_id: UUID, template_id: UUID, ops: list[dict[str, Any]]
+    db: AsyncSession,
+    project_id: UUID,
+    template_id: UUID,
+    ops: Annotated[list[dict[str, Any]], _OPS_SCHEMA],
 ) -> EditTemplateDraftResult:
     scope = AuditScope(
         tool=_TOOL,
@@ -130,6 +160,8 @@ async def edit_template_draft(
                 McpErrorCode.DRAFT_LOCK_HELD,
                 "Another manager is editing this draft.",
                 holder_name=(exc.details or {}).get("holder_name"),
+                untrusted_content=True,
+                untrusted_fields=["holder_name"],
             ),
         )
     except DraftOpError as exc:
@@ -146,7 +178,7 @@ async def edit_template_draft(
             McpToolError(McpErrorCode.RETRY, "A concurrent edit won; nothing was changed."),
         )
 
-    return EditTemplateDraftResult(
+    result = EditTemplateDraftResult(
         status="draft_saved_unpublished",
         visible_to_reviewers_and_ai=False,
         applied=[
@@ -160,10 +192,19 @@ async def edit_template_draft(
             )
             for a in applied
         ],
-        diff=diff,
-        editor_path=f"/projects/{project_id}?{_EDITOR_TAB[template.kind]}",
+        diff=capped_diff(diff, budget=0),  # placeholder: measures the rest of the result
+        draft_fingerprint=diff.fingerprint,
+        editor_url=f"{settings.PUBLIC_APP_URL.rstrip('/')}/projects/{project_id}?"
+        f"{_EDITOR_TAB[template.kind]}",
         next_step=_NEXT_STEP,
     )
+    # The diff gets whatever the result cap leaves after everything else
+    # (measured with the row-less diff above, whose own fixed part the
+    # budget then re-counts).
+    rest = len(compact_json(result.model_dump(mode="json"))) - len(
+        compact_json(result.diff.model_dump(mode="json"))
+    )
+    return result.model_copy(update={"diff": capped_diff(diff, budget=RESULT_CAP - rest)})
 
 
 def _parse_ops(ops: list[dict[str, Any]]) -> list[DraftOp]:
@@ -177,19 +218,29 @@ def _parse_ops(ops: list[dict[str, Any]]) -> list[DraftOp]:
     for index, raw in enumerate(ops):
         op_name = raw.get("op")
         model = _OPS.get(op_name) if isinstance(op_name, str) else None
-        if model is None or (model is UpdateQuestionOp and {"type", "options"} & raw.keys()):
+        if model is None:
             raise McpToolError(
-                McpErrorCode.OP_NOT_ALLOWED_VIA_AGENT, _NOT_ALLOWED_MESSAGE, op_index=index
+                McpErrorCode.OP_NOT_ALLOWED_VIA_AGENT,
+                _NOT_ALLOWED_MESSAGE,
+                op_index=index,
+                allowed_ops=_ALLOWED_OPS,
+            )
+        locked = sorted(_LOCKED_UPDATE_KEYS & raw.keys()) if model is UpdateQuestionOp else []
+        if locked:
+            raise McpToolError(
+                McpErrorCode.OP_NOT_ALLOWED_VIA_AGENT,
+                _LOCKED_KEY_MESSAGE,
+                next_step=_LOCKED_KEY_NEXT_STEP,
+                op_index=index,
+                allowed_ops=_ALLOWED_OPS,
+                field=locked[0],
+                editable_fields=_EDITABLE_UPDATE_FIELDS,
             )
         reject_nul(raw, op_index=index)
         try:
             parsed.append(model.model_validate(raw))
         except ValidationError as exc:
-            first = exc.errors()[0]
-            loc = ".".join(str(part) for part in first["loc"]) or "op"
-            raise McpToolError(
-                McpErrorCode.INVALID_ARGUMENT, first["msg"], op_index=index, field=loc
-            ) from exc
+            raise validation_failure(exc, op_index=index) from exc
     return parsed
 
 
@@ -217,11 +268,7 @@ def _op_failure(exc: DraftOpError) -> McpToolError | None:
             op_index=exc.op_index,
         )
     if isinstance(cause, ValidationError):
-        first = cause.errors()[0]
-        loc = ".".join(str(part) for part in first["loc"]) or "op"
-        return McpToolError(
-            McpErrorCode.INVALID_ARGUMENT, first["msg"], op_index=exc.op_index, field=loc
-        )
+        return validation_failure(cause, op_index=exc.op_index)
     if isinstance(cause, DBAPIError) and is_deadlock(cause):
         return McpToolError(
             McpErrorCode.RETRY, "A concurrent edit won; nothing was changed.", op_index=exc.op_index

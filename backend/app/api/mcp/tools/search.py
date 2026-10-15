@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
+from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.mcp.errors import McpErrorCode, McpToolError
@@ -18,31 +20,26 @@ from app.services.article_text_search_service import (
 )
 from app.utils.opaque_cursor import InvalidCursorError
 
-_QUERY_CAP = 200
-
 
 @agent_tool(
     requires="read",
     project_arg="project_id",
     title="Search project text",
+    destructive=False,
     description=(
-        "Keyword search over the parsed text of a project's articles; returns hits with "
-        "article, page, block locator and a snippet. The 'simple' config does not stem or "
-        "strip accents: try variant spellings (plural, pt/en, accented). Call "
-        "get_article_text with the hit's article_id and page next."
+        "Keyword search over the parsed text of a project's articles; returns one row per "
+        "article file, each with its hits (page, block locator, snippet). The 'simple' config "
+        "does not stem or strip accents: try variant spellings (plural, pt/en, accented). "
+        "Call get_article_text with the row's article_id and the hit's page next."
     ),
 )
 async def search_project_text(
     db: AsyncSession,
     project_id: UUID,
-    query: str,
+    query: Annotated[str, Field(max_length=200)],
     article_id: UUID | None = None,
     cursor: str | None = None,
 ) -> McpSearchResult:
-    if len(query) > _QUERY_CAP:
-        raise McpToolError(
-            McpErrorCode.INVALID_ARGUMENT, "query is capped at 200 characters", field="query"
-        )
     if article_id is not None:
         # A foreign or missing article_id raises ArticleNotFoundError: the dispatcher maps it to NOT_FOUND.
         await owned_article(db, project_id=project_id, article_id=article_id)

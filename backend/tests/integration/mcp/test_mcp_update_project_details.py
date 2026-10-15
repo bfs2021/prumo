@@ -74,6 +74,8 @@ async def test_applied_edit_returns_before_after_and_writes_one_row(
         "before": {"description": current["description"]},
         "after": {"description": "New"},
         "note": None,
+        "untrusted_content": True,
+        "untrusted_fields": ["before{}", "after{}"],
     }
 
     after = await _current(db_session, "description")
@@ -226,6 +228,8 @@ async def test_stale_value_returns_current_and_writes_nothing(
     error = error_payload(result)
     assert error["code"] == "STALE_VALUE"
     assert error["current"] == {"name": current["name"]}
+    assert error["untrusted_content"] is True
+    assert error["untrusted_fields"] == ["current{}"]
 
     after = await _current(db_session, "name")
     assert after["name"] == current["name"]
@@ -313,22 +317,28 @@ async def test_unexpected_error_is_internal_with_no_row(
     assert (await _audit_count(db_session, outcome="refused")) == 0
 
 
-async def test_update_project_details_requires_user_interaction_meta(mcp_client, pat_primary_rw):
+async def test_update_project_details_is_a_non_destructive_write(mcp_client, pat_primary_rw):
     async with mcp_client(pat_primary_rw) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
     t = tools["update_project_details"]
-    assert t.meta["anthropic/requiresUserInteraction"] is True
-    # F12: confirmation is client-dependent; the audit is not.
-    assert "Clients that support it (e.g. Claude Code) ask" in t.description
+    assert "anthropic/requiresUserInteraction" not in (t.meta or {})
+    assert "ask the human" not in t.description
     assert "audited" in t.description
     a = t.annotations
-    assert a.destructive_hint is True
+    assert a.destructive_hint is False
     assert a.idempotent_hint is True
     assert a.read_only_hint is False
     assert a.open_world_hint is False
     assert t.title
     assert t.output_schema is not None
-    assert set(t.output_schema["properties"]) == {"project_id", "before", "after", "note"}
+    assert set(t.output_schema["properties"]) == {
+        "project_id",
+        "before",
+        "after",
+        "note",
+        "untrusted_content",
+        "untrusted_fields",
+    }
 
 
 async def test_nul_in_a_string_is_invalid_argument_before_any_write(
@@ -354,3 +364,20 @@ async def test_nul_in_a_string_is_invalid_argument_before_any_write(
     assert error["field"] == "fields.description"
     assert (await _current(db_session, "description")) == current
     assert (await _audit_count(db_session, outcome="refused", error_code="INVALID_ARGUMENT")) == 1
+
+
+async def test_null_name_message_has_no_pydantic_prefix(
+    mcp_client, pat_primary_rw, db_session: AsyncSession
+):
+    # Regression guard: validation_failure (task 1.7) already strips "Value error, ".
+    current = await _current(db_session, "name")
+    result = await call_tool(
+        mcp_client,
+        pat_primary_rw,
+        "update_project_details",
+        {"project_id": str(P), "fields": {"name": None}, "expected": {"name": current["name"]}},
+    )
+    error = error_payload(result)
+    assert error["code"] == "INVALID_ARGUMENT"
+    assert error["field"] == "name"
+    assert not error["message"].startswith("Value error,")

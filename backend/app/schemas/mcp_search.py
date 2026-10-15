@@ -11,23 +11,33 @@ from pydantic import BaseModel
 
 
 class McpSearchHit(BaseModel):
-    article_id: UUID
-    title: str
-    title_truncated: bool
-    article_file_id: UUID
+    locator: str
     page: int
-    block_id: UUID
     block_index: int
     block_type: str
-    locator: str
     snippet: str
 
 
-class McpSearchResult(BaseModel):
+class McpSearchArticle(BaseModel):
+    """One article file's hits on this page, in rank order. An article whose
+    hits span two files appears once per file."""
+
+    article_id: UUID
+    title: str
+    title_truncated: bool
+    file_id: UUID
     hits: list[McpSearchHit]
+
+
+class McpSearchResult(BaseModel):
+    articles: list[McpSearchArticle]
     next_cursor: str | None
     note: str | None
-    untrusted_content: bool = True
+    untrusted_content: Literal[True] = True
+    untrusted_fields: list[str] = [
+        "articles[].title",
+        "articles[].hits[].snippet",
+    ]
 
 
 class McpPdfLink(BaseModel):
@@ -41,3 +51,7 @@ class McpArticlePdfResult(BaseModel):
     pdf: McpPdfLink | None
     reason: Literal["no_pdf"] | None
     next_step: str | None
+    untrusted_content: Literal[True] = True
+    untrusted_fields: list[str] = [
+        "pdf.filename",
+    ]

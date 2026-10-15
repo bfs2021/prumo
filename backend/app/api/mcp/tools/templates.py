@@ -39,14 +39,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.security import is_project_manager
 from app.api.mcp.asgi_auth import current_principal
+from app.api.mcp.draft_diff import capped_diff
 from app.api.mcp.errors import McpErrorCode, McpToolError
 from app.api.mcp.server import agent_tool
 from app.llm.claim_value import normalize_options
 from app.schemas.extraction_run import RunViewEntityType, RunViewField
-from app.schemas.hitl_session import TemplateConfigDiffRead
 from app.schemas.mcp_templates import (
-    McpDraftChange,
-    McpDraftDiff,
     McpTemplateQuestion,
     McpTemplateSection,
     McpTemplateView,
@@ -67,8 +65,6 @@ from app.utils.opaque_cursor import (
     encode_cursor,
 )
 
-_DIFF_ROW_CAP = 40
-_TIER_ORDER = ("additive", "cosmetic", "semantic", "destructive")
 #: Reserved for `next_cursor` itself: the envelope is measured with it
 #: `None`, but a page that is NOT the last one replaces that with an
 #: opaque base64 cursor string a caller's later page count could grow
@@ -78,10 +74,11 @@ _CURSOR_RESERVE = 64
 
 def _json_len(model: BaseModel) -> int:
     """Length of `compact_json` (task 2c's one serializer): the same measure
-    the size-cap tests apply (`len(json.dumps(page))`) and the dispatcher
+    the size-cap tests apply (`len(compact_json(page))`) and the dispatcher
     uses for a result's text copy, which is longer than pydantic's own
     compact `model_dump_json()` -- every key and every list item gets extra
-    `", "` / `": "` spacing. All size accounting in this module uses this,
+    `", "` / `": "` spacing. Non-ASCII renders raw (one char each); only
+    quotes, backslashes and control characters grow when escaped. All size accounting in this module uses this,
     never the raw `model_dump_json()` length, or the budget under-charges
     and a page can clear the compact count while still exceeding the real
     32,000-char cap."""
@@ -92,6 +89,7 @@ def _json_len(model: BaseModel) -> int:
     requires="read",
     project_arg="project_id",
     title="Get template",
+    destructive=False,
     description=(
         "Return a questionnaire: sections -> questions (type, options, instructions), whether a "
         "draft is open, the published version and the draft's changes vs published. Paged: pass "
@@ -131,7 +129,7 @@ async def get_template(
 
     diff = None
     if raw is None and is_manager:
-        diff = _capped_diff(
+        diff = capped_diff(
             await get_template_config_diff(db, project_id=project_id, template_id=template_id)
         )
 
@@ -280,41 +278,3 @@ def _options(allowed_values: object) -> list[str] | None:
         str(opt.get("label") or opt.get("value")) if isinstance(opt, dict) else str(opt)
         for opt in opts
     ]
-
-
-def _capped_diff(diff: TemplateConfigDiffRead) -> McpDraftDiff:
-    buckets = {
-        "additive": diff.changes.additive,
-        "cosmetic": diff.changes.cosmetic,
-        "semantic": diff.changes.semantic,
-        "destructive": diff.changes.destructive,
-    }
-    counts = {tier: len(rows) for tier, rows in buckets.items()}
-    changes: list[McpDraftChange] = []
-    truncated = False
-    for tier in _TIER_ORDER:
-        for row in buckets[tier]:
-            if len(changes) >= _DIFF_ROW_CAP:
-                truncated = True
-                break
-            changes.append(
-                McpDraftChange(
-                    tier=tier,
-                    variant=str(row.variant),
-                    label_path=row.label_path,
-                    attribute=row.attribute,
-                    before=_trunc(row.before),
-                    after=_trunc(row.after),
-                )
-            )
-        if truncated:
-            break
-    return McpDraftDiff(
-        status=str(diff.status), counts=counts, changes=changes, changes_truncated=truncated
-    )
-
-
-def _trunc(value: str | bool | None) -> str | None:
-    if value is None:
-        return None
-    return str(value)[:200]

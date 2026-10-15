@@ -21,6 +21,7 @@ import re
 import subprocess
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
@@ -1305,15 +1306,17 @@ async def test_0056_makes_provenance_server_only(migration_session: AsyncSession
 
     Guards the exact failure this hardening was written against: a column-level
     REVOKE layered on a table-level GRANT does nothing, so the protection can
-    look present in the migration and be absent in the database.
+    look present in the migration and be absent in the database. The column
+    grants 0056 left on the other columns were later revoked
+    (``0081_revoke_member_writes``): every proposal write goes through the API.
     """
     assert (
         await migration_session.execute(_AUTHENTICATED_CAN_UPDATE_PROVENANCE)
     ).scalar() is False, (
         "authenticated must NOT be able to UPDATE extraction_proposal_records.provenance"
     )
-    assert (await migration_session.execute(_AUTHENTICATED_CAN_UPDATE_VALUE)).scalar() is True, (
-        "the rest of the table's UPDATE grant must be preserved (only provenance is withheld)"
+    assert (await migration_session.execute(_AUTHENTICATED_CAN_UPDATE_VALUE)).scalar() is False, (
+        "authenticated has no UPDATE on any proposal-record column: writes go through the API"
     )
     assert (
         await migration_session.execute(_AUTHENTICATED_CAN_INSERT_PROVENANCE)
@@ -1328,7 +1331,7 @@ async def test_alembic_head_is_expected_revision(migration_db_url: str) -> None:
     out = _run_alembic("current", database_url=migration_db_url)
     # ``alembic current`` prints either ``<revision> (head)`` or just the id;
     # match the revision we expect to live at head.
-    expected_head = "0080_article_text_fts"
+    expected_head = "0082_pat_project_scope"
     assert expected_head in out, f"Expected head revision {expected_head!r}, got:\n{out}"
 
 
@@ -1788,3 +1791,124 @@ async def test_migration_0080_article_text_fts_roundtrip(
     finally:
         _run_alembic("upgrade", "head", database_url=migration_db_url)
     assert await has_index()
+
+
+# --- 0081: member writes revoked, append-only history trigger ---------------
+@pytest.mark.asyncio
+async def test_migration_0081_revoke_member_writes_roundtrip(
+    migration_db_url: str, migration_session: AsyncSession
+) -> None:
+    async def posture() -> tuple[bool, bool, bool, bool, bool]:
+        row = (
+            await migration_session.execute(
+                text(
+                    "SELECT has_table_privilege("
+                    "  'authenticated', 'public.extraction_evidence', 'INSERT'),"
+                    " has_any_column_privilege("
+                    "  'authenticated', 'public.extraction_proposal_records', 'INSERT'),"
+                    " has_any_column_privilege("
+                    "  'authenticated', 'public.extraction_proposal_records', 'UPDATE'),"
+                    " has_column_privilege('authenticated',"
+                    "  'public.extraction_proposal_records', 'proposed_value', 'UPDATE'),"
+                    " to_regprocedure('public.refuse_append_only_change()') IS NOT NULL"
+                )
+            )
+        ).one()
+        await migration_session.rollback()
+        return tuple(bool(v) for v in row)  # type: ignore[return-value]
+
+    revoked = (False, False, False, False, True)
+    assert await posture() == revoked
+    _run_alembic("downgrade", "0080_article_text_fts", database_url=migration_db_url)
+    try:
+        assert await posture() == (True, True, True, True, False)
+    finally:
+        _run_alembic("upgrade", "head", database_url=migration_db_url)
+    assert await posture() == revoked
+
+
+# --- 0082: optional per-project restriction on personal access tokens -------
+@pytest.mark.asyncio
+async def test_migration_0082_pat_project_scope_roundtrip(
+    migration_db_url: str, migration_session: AsyncSession
+) -> None:
+    user_id, restricted_id, open_id = uuid4(), uuid4(), uuid4()
+
+    async def column_and_check() -> tuple[bool, bool]:
+        row = (
+            await migration_session.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns"
+                    "  WHERE table_schema = 'public' AND table_name = 'personal_access_tokens'"
+                    "  AND column_name = 'project_ids'),"
+                    " EXISTS (SELECT 1 FROM pg_constraint"
+                    "  WHERE conname = 'ck_personal_access_tokens_project_ids_check'"
+                    "  AND conrelid = 'public.personal_access_tokens'::regclass)"
+                )
+            )
+        ).one()
+        await migration_session.rollback()
+        return bool(row[0]), bool(row[1])
+
+    async def revoked() -> dict[str, bool]:
+        rows = (
+            await migration_session.execute(
+                text(
+                    "SELECT id::text, revoked_at IS NOT NULL FROM public.personal_access_tokens "
+                    "WHERE user_id = :u"
+                ),
+                {"u": str(user_id)},
+            )
+        ).all()
+        await migration_session.rollback()
+        return {r[0]: bool(r[1]) for r in rows}
+
+    async def insert_token(token_id: UUID, project_ids: list[str] | None) -> None:
+        await migration_session.execute(
+            text(
+                "INSERT INTO public.personal_access_tokens (id, user_id, name, token_prefix,"
+                " token_hash, scope, expires_at, project_ids) VALUES (:id, :u, 't',"
+                " 'prumo_pat_x', :h, 'read', now() + interval '1 day', CAST(:p AS uuid[]))"
+            ),
+            {"id": str(token_id), "u": str(user_id), "h": str(token_id), "p": project_ids},
+        )
+
+    assert await column_and_check() == (True, True)
+    await migration_session.execute(
+        text(
+            "INSERT INTO auth.users (id, email, instance_id, aud, role) VALUES (:u,"
+            " 'pat-0082@test.local', '00000000-0000-0000-0000-000000000000',"
+            " 'authenticated', 'authenticated')"
+        ),
+        {"u": str(user_id)},
+    )
+    await migration_session.execute(
+        text("INSERT INTO public.profiles (id, email) VALUES (:u, 'pat-0082@test.local')"),
+        {"u": str(user_id)},
+    )
+    await migration_session.commit()
+    try:
+        with pytest.raises(Exception, match="ck_personal_access_tokens_project_ids_check"):
+            await insert_token(uuid4(), [])
+        await migration_session.rollback()
+        await insert_token(restricted_id, [str(uuid4())])
+        await insert_token(open_id, None)
+        await migration_session.commit()
+        assert await revoked() == {str(restricted_id): False, str(open_id): False}
+        _run_alembic("downgrade", "0081_revoke_member_writes", database_url=migration_db_url)
+        try:
+            assert await column_and_check() == (False, False)
+            # Fail closed: a restricted token never survives as an all-projects token.
+            assert await revoked() == {str(restricted_id): True, str(open_id): False}
+        finally:
+            _run_alembic("upgrade", "head", database_url=migration_db_url)
+        assert await column_and_check() == (True, True)
+        assert await revoked() == {str(restricted_id): True, str(open_id): False}
+    finally:
+        await migration_session.execute(
+            text("DELETE FROM public.profiles WHERE id = :u"), {"u": str(user_id)}
+        )
+        await migration_session.execute(
+            text("DELETE FROM auth.users WHERE id = :u"), {"u": str(user_id)}
+        )
+        await migration_session.commit()

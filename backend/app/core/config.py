@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from pydantic import PostgresDsn, field_validator
+from pydantic import Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.config_validators import validate_linear_team_id
@@ -39,6 +39,9 @@ class Settings(BaseSettings):
 
     # =================== CORS ===================
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://localhost:8080,http://127.0.0.1:8080,https://prumoai.vercel.app"
+
+    # Public origin of the web app: links in agent (MCP) results point here.
+    PUBLIC_APP_URL: str = "https://prumoai.vercel.app"
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -94,6 +97,11 @@ class Settings(BaseSettings):
     MCP_ALLOWED_HOSTS: str = "localhost:*,127.0.0.1:*,[::1]:*,test"
     # Empty: no browser Origin may call /mcp. CLI agents send no Origin and pass.
     MCP_ALLOWED_ORIGINS: str = ""
+    # Concurrent /mcp requests per token per process; over it -> 429 with
+    # Retry-After: 1, refused before any database checkout. Half the default
+    # web pool (DB_POOL_SIZE + DB_MAX_OVERFLOW = 8), so one token's burst
+    # leaves connections for every other caller.
+    MCP_MAX_INFLIGHT_PER_TOKEN: int = Field(default=4, ge=1)
 
     @property
     def mcp_allowed_hosts(self) -> list[str]:
@@ -130,6 +138,15 @@ class Settings(BaseSettings):
     # Set this to the Supabase "Direct connection" URL (port 5432, db.xxx.supabase.co).
     # Falls back to DATABASE_URL in local dev where there is in the pooler.
     DIRECT_DATABASE_URL: str | None = None
+    # The web engine's pool (one gunicorn worker per container). Production
+    # reaches the Supabase pooler in session mode, capped at 15 clients: the
+    # web pool (size + overflow = 8) plus the Celery worker (2 children x up to
+    # 2 sessions = 4) leaves headroom for migrations and admin sessions.
+    # A checkout that waits past DB_POOL_TIMEOUT seconds raises
+    # sqlalchemy.exc.TimeoutError (/mcp answers it with 503 + Retry-After).
+    DB_POOL_SIZE: int = Field(default=5, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=3, ge=0)  # 0 is valid: a fixed-size pool
+    DB_POOL_TIMEOUT: float = Field(default=10.0, gt=0)
 
     @property
     def async_database_url(self) -> str:
@@ -199,6 +216,13 @@ class Settings(BaseSettings):
 
     # =================== RATE LIMITING ===================
     RATE_LIMIT_PER_MINUTE: int = 60
+    # Shared limiter storage (Redis in production) so budgets hold across
+    # processes and restarts. Unset -> per-process ``memory://``.
+    RATE_LIMIT_STORAGE_URI: str | None = None
+
+    # =================== REDIS ===================
+    # Celery broker/result backend and the job-owner records.
+    REDIS_URL: str = "redis://localhost:6379/0"
 
     # =================== SECURITY ===================
     # Chave for criptografia de data sensiveis (ex: Zotero API key)

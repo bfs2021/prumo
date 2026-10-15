@@ -29,7 +29,13 @@ class McpProjectList(BaseModel):
     caller_name: str | None
     token_scope: Literal["read", "read_write"]
     token_expires_at: datetime
+    token_project_ids: list[UUID] | None = None  # None = every project of the token's user
     note: str | None = None
+    untrusted_content: Literal[True] = True
+    untrusted_fields: list[str] = [
+        "projects[].name",
+        "caller_name",
+    ]
 
 
 class McpProjectCounts(BaseModel):
@@ -53,3 +59,17 @@ class McpProjectOverview(BaseModel):
     details: ProjectDetailsValues  # typed outputSchema; never truncated (update_project_details needs exact `expected`)
     counts: McpProjectCounts
     templates: list[McpTemplateSummary]
+    untrusted_content: Literal[True] = True
+    untrusted_fields: list[str] = [
+        "details.name",
+        "details.description",
+        "details.review_title",
+        "details.condition_studied",
+        "details.review_rationale",
+        "details.search_strategy",
+        "details.eligibility_criteria{}",
+        "details.study_design{}",
+        "details.review_keywords[]",
+        "details.review_context",
+        "templates[].name",
+    ]

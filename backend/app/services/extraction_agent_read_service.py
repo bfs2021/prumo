@@ -14,8 +14,8 @@ boundary, never an unblinded aggregate.
 
 Fix rounds 1-2 (page-size cap): every page's real JSON size is measured
 through `compact_json` (`app/utils/compact_json.py`), never
-`BaseModel.model_dump_json()` (more compact, and escapes non-ASCII as raw
-UTF-8 instead of `\\uXXXX`, so it under-counts long non-ASCII values). The
+`BaseModel.model_dump_json()` (no separators, so it under-counts every
+key and list item). The
 budget reserves room for `next_cursor` (`_CURSOR_RESERVE`) and charges
 every article's own envelope -- `title`/`run`/`reason`/`peer_values_hidden`
 -- once per page it appears on, populated, resumed or run-less alike
@@ -74,7 +74,6 @@ from app.utils.opaque_cursor import (
     encode_cursor,
 )
 from app.utils.text_caps import cap_text, join_capped
-from app.utils.untrusted import wrap_untrusted
 
 _PAGE_BUDGET = 28_000
 _CONCISE_VALUE_CAP = 80
@@ -383,7 +382,7 @@ def _evidence_for(
             continue
         out.append(
             McpEvidence(
-                quote=wrap_untrusted(ev.text_content[:_EVIDENCE_QUOTE_CAP]),
+                quote=ev.text_content[:_EVIDENCE_QUOTE_CAP],
                 locator=f"p{ev.page_number}" if ev.page_number is not None else None,
             )
         )
