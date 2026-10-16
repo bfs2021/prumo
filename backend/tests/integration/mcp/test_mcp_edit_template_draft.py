@@ -27,11 +27,13 @@ from app.services import template_field_naming, template_field_service
 from app.services.pat_service import create_token, resolve_principal
 from app.utils.compact_json import RESULT_CAP, compact_json
 from tests.integration.conftest import SEED, clean_project_clones
+from tests.integration.helpers.engine_setup import run_in_extract
 from tests.integration.helpers.template_fixtures import (
     ARTICLE_ID,
     add_field,
     add_section,
     draft_lock_holder,
+    force_narrow_baseline,
     fresh_charms,
 )
 from tests.integration.mcp.conftest import SeededPat
@@ -66,6 +68,28 @@ async def _label_set(db: AsyncSession, template_id: UUID) -> frozenset[str]:
     return frozenset(f"{row.id}:{row.label}" for row in rows)
 
 
+async def _names(db: AsyncSession, project_id: UUID, template_id: UUID) -> dict[str, str]:
+    row = (
+        await db.execute(
+            text(
+                "SELECT p.name AS project_name, t.name AS template_name "
+                "FROM public.project_extraction_templates t "
+                "JOIN public.projects p ON p.id = t.project_id WHERE t.id = :tid AND p.id = :pid"
+            ),
+            {"tid": str(template_id), "pid": str(project_id)},
+        )
+    ).one()
+    assert row.project_name and row.template_name
+    return {"project_name": row.project_name, "template_name": row.template_name}
+
+
+def _assert_named(payload: dict[str, Any], names: dict[str, str]) -> None:
+    assert payload["project_name"] == names["project_name"]
+    assert payload["template_name"] == names["template_name"]
+    assert payload["untrusted_content"] is True
+    assert {"project_name", "template_name"} <= set(payload["untrusted_fields"])
+
+
 async def _audit_count(db: AsyncSession, *, outcome: str) -> int:
     return (
         await db.execute(
@@ -92,7 +116,7 @@ async def test_success_returns_unpublished_draft(
             "section_id": section_id,
             "label": "Follow-up (months)",
             "type": "select",
-            "options": ["6", "12"],
+            "options": [{"label": "6"}, {"label": "12"}],
         },
         {"op": "update_question", "field_id": field_id, "label": "Reworded"},
     ]
@@ -116,8 +140,16 @@ async def test_success_returns_unpublished_draft(
     assert body["draft_fingerprint"]
     assert body["diff"]["changes_truncated"] is False
     assert "Publish" in body["next_step"]
+    names = await _names(db_session, project_id, template_id)
+    assert body["project_name"] == names["project_name"]
+    assert body["template_name"] == names["template_name"]
+    section_label = next(et["label"] for et in schema["entity_types"] if et["id"] == section_id)
+    assert [a["section_label"] for a in body["applied"]] == [section_label, section_label]
     assert body["untrusted_content"] is True
     assert set(body["untrusted_fields"]) == {
+        "project_name",
+        "template_name",
+        "applied[].section_label",
         "applied[].name",
         "applied[].label",
         "diff.changes[].label_path[]",
@@ -156,7 +188,7 @@ async def test_add_question_mapping(mcp_client, pat_primary_rw, db_session: Asyn
             "section_id": section_id,
             "label": "Mapped Q",
             "type": "select",
-            "options": ["a", "b"],
+            "options": [{"label": "Yes"}, {"value": "n", "label": "No"}],
             "instructions": "Some hint",
         }
     ]
@@ -178,9 +210,44 @@ async def test_add_question_mapping(mcp_client, pat_primary_rw, db_session: Asyn
         )
     ).one()
     assert str(row.entity_type_id) == section_id
-    assert row.allowed_values == ["a", "b"]
+    assert row.allowed_values == [{"value": "Yes", "label": "Yes"}, {"value": "n", "label": "No"}]
     assert row.llm_description == "Some hint"
     assert row.sort_order == max_sort_order + 1
+
+
+async def test_add_question_duplicate_option_value_is_invalid_argument(
+    mcp_client, pat_primary_rw, db_session: AsyncSession
+) -> None:
+    project_id, template_id, schema = await fresh_charms(db_session)
+    section_id, _field_id = _section_and_field(schema)
+    before = await _label_set(db_session, template_id)
+    refused_before = await _audit_count(db_session, outcome="refused")
+
+    result = await call_tool(
+        mcp_client,
+        pat_primary_rw,
+        "edit_template_draft",
+        {
+            "project_id": str(project_id),
+            "template_id": str(template_id),
+            "ops": [
+                {
+                    "op": "add_question",
+                    "section_id": section_id,
+                    "label": "Dup options",
+                    "type": "select",
+                    "options": [{"label": "Yes"}, {"value": "Yes", "label": "Again"}],
+                }
+            ],
+        },
+    )
+
+    payload = error_payload(result)
+    assert payload["code"] == "INVALID_ARGUMENT"
+    assert payload["field"] == "options"
+    assert payload["message"] == "option values must be unique"
+    assert await _label_set(db_session, template_id) == before
+    assert await _audit_count(db_session, outcome="refused") == refused_before + 1
 
 
 async def test_derived_name_collision_suffixes(
@@ -241,9 +308,58 @@ async def test_draft_lock_held(mcp_client, pat_primary_rw, db_session: AsyncSess
     assert payload["code"] == "DRAFT_LOCK_HELD"
     assert payload["holder_name"] == "Integration Reviewer"
     assert payload["untrusted_content"] is True
-    assert payload["untrusted_fields"] == ["holder_name"]
+    assert payload["untrusted_fields"] == ["holder_name", "project_name", "template_name"]
+    _assert_named(payload, await _names(db_session, project_id, template_id))
     assert await draft_lock_holder(db_session, template_id) == SEED.reviewer_profile
     assert await _label_set(db_session, template_id) == before
+    assert await _audit_count(db_session, outcome="refused") == 1
+
+
+async def _deactivate_version(db: AsyncSession, template_id: UUID, _section_id: str) -> None:
+    await db.execute(
+        text(
+            "UPDATE public.extraction_template_versions SET is_active = false "
+            "WHERE project_template_id = :t"
+        ),
+        {"t": str(template_id)},
+    )
+    await db.flush()
+
+
+async def _legacy_baseline(db: AsyncSession, template_id: UUID, section_id: str) -> None:
+    await force_narrow_baseline(db, template_id, UUID(section_id))
+
+
+@pytest.mark.parametrize(
+    "break_baseline",
+    [_legacy_baseline, _deactivate_version],
+    ids=["narrow_baseline", "no_published_version"],
+)
+async def test_draft_lock_held_precedes_baseline_refusals(
+    mcp_client, pat_primary_rw, db_session: AsyncSession, break_baseline: Any
+) -> None:
+    # The claim runs before the baseline check, so a held lock answers first.
+    project_id, template_id, schema = await fresh_charms(db_session)
+    section_id, _field_id = _section_and_field(schema)
+    await break_baseline(db_session, template_id, section_id)
+    await db_session.execute(
+        text("UPDATE public.project_extraction_templates SET config_draft_by = :r WHERE id = :t"),
+        {"r": str(SEED.reviewer_profile), "t": str(template_id)},
+    )
+    await db_session.flush()
+
+    ops = [{"op": "add_question", "section_id": section_id, "label": "Q", "type": "text"}]
+    payload = error_payload(
+        await call_tool(
+            mcp_client,
+            pat_primary_rw,
+            "edit_template_draft",
+            {"project_id": str(project_id), "template_id": str(template_id), "ops": ops},
+        )
+    )
+    assert payload["code"] == "DRAFT_LOCK_HELD"
+    _assert_named(payload, await _names(db_session, project_id, template_id))
+    assert await draft_lock_holder(db_session, template_id) == SEED.reviewer_profile
     assert await _audit_count(db_session, outcome="refused") == 1
 
 
@@ -349,7 +465,10 @@ async def test_foreign_template_with_too_many_ops_is_not_found(
             "ops": ops,
         },
     )
-    assert error_payload(result)["code"] == "NOT_FOUND"
+    payload = error_payload(result)
+    assert payload["code"] == "NOT_FOUND"
+    assert "project_name" not in payload
+    assert "template_name" not in payload
     after = (
         await db_session.execute(text("SELECT count(*) FROM public.agent_actions"))
     ).scalar_one()
@@ -374,7 +493,7 @@ async def test_foreign_template_with_too_many_ops_is_not_found(
                 "section_id": section_id,
                 "label": "Q",
                 "type": "text",
-                "options": ["a"],
+                "options": [{"label": "a"}],
             },
             "options",
         ),
@@ -479,47 +598,107 @@ async def test_no_published_version_refused(
     payload = error_payload(result)
     assert payload["code"] == "NO_PUBLISHED_VERSION"
     assert payload["retryable"] is False
+    _assert_named(payload, await _names(db_session, project_id, template_id))
     assert await _label_set(db_session, template_id) == before
     assert await draft_lock_holder(db_session, template_id) is None
     assert await _audit_count(db_session, outcome="refused") == 1
 
 
-async def test_narrow_baseline_refused(
-    mcp_client, pat_primary_rw, db_session: AsyncSession
-) -> None:
-    before = await _label_set(db_session, SEED.primary_template)
-    ops = [
-        {
-            "op": "add_question",
-            "section_id": str(SEED.primary_entity_type),
-            "label": "Q",
-            "type": "text",
-        },
-        {"op": "update_question", "field_id": str(SEED.primary_field), "label": "New label"},
+async def _legacy_snapshot(db: AsyncSession) -> tuple[UUID, UUID, list[dict[str, Any]]]:
+    project_id, template_id, schema = await fresh_charms(db)
+    section_id, field_id = _section_and_field(schema)
+    await force_narrow_baseline(db, template_id, UUID(section_id))
+    return project_id, template_id, _baseline_ops(section_id, field_id)
+
+
+async def _pinned_empty_version(db: AsyncSession) -> tuple[UUID, UUID, list[dict[str, Any]]]:
+    # The seeded template publishes an empty v1; a run now pins it.
+    await run_in_extract(db)
+    return (
+        SEED.primary_project,
+        SEED.primary_template,
+        _baseline_ops(str(SEED.primary_entity_type), str(SEED.primary_field)),
+    )
+
+
+def _baseline_ops(section_id: str, field_id: str) -> list[dict[str, Any]]:
+    return [
+        {"op": "add_question", "section_id": section_id, "label": "Q", "type": "text"},
+        {"op": "update_question", "field_id": field_id, "label": "New label"},
     ]
+
+
+@pytest.mark.parametrize(
+    ("setup", "message", "next_step"),
+    [
+        (
+            _legacy_snapshot,
+            "The published version of this template uses an older format.",
+            "publish once in prumo to refresh the published version, then retry",
+        ),
+        (
+            _pinned_empty_version,
+            "The published version of this template is empty and a run is pinned to it.",
+            "publish the current draft in prumo so runs move to a version with questions, "
+            "then retry",
+        ),
+    ],
+    ids=["legacy_snapshot", "pinned_empty_version"],
+)
+async def test_narrow_baseline_refused(
+    mcp_client,
+    pat_primary_rw,
+    db_session: AsyncSession,
+    setup: Any,
+    message: str,
+    next_step: str,
+) -> None:
+    project_id, template_id, ops = await setup(db_session)
+    before = await _label_set(db_session, template_id)
     result = await call_tool(
         mcp_client,
         pat_primary_rw,
         "edit_template_draft",
-        {
-            "project_id": str(SEED.primary_project),
-            "template_id": str(SEED.primary_template),
-            "ops": ops,
-        },
+        {"project_id": str(project_id), "template_id": str(template_id), "ops": ops},
     )
     payload = error_payload(result)
     assert payload["code"] == "NARROW_BASELINE"
-    assert await _label_set(db_session, SEED.primary_template) == before
-    assert await draft_lock_holder(db_session, SEED.primary_template) is None
+    assert payload["message"] == message
+    assert payload["next_step"] == next_step
+    _assert_named(payload, await _names(db_session, project_id, template_id))
+    assert await _label_set(db_session, template_id) == before
+    assert await draft_lock_holder(db_session, template_id) is None
     assert (
         await db_session.execute(
             text(
                 "SELECT count(*) FROM public.agent_actions WHERE outcome = 'refused' "
                 "AND tool = 'edit_template_draft' AND template_id = :t"
             ),
-            {"t": str(SEED.primary_template)},
+            {"t": str(template_id)},
         )
     ).scalar_one() == 1
+
+
+async def test_blank_template_edit_applies(
+    mcp_client, pat_primary_rw, db_session: AsyncSession
+) -> None:
+    # The seeded template publishes an empty v1 and no run is pinned to it.
+    section_id = await add_section(db_session, SEED.primary_template, "blank_section")
+    ops = [{"op": "add_question", "section_id": str(section_id), "label": "Q", "type": "text"}]
+    body = structured(
+        await call_tool(
+            mcp_client,
+            pat_primary_rw,
+            "edit_template_draft",
+            {
+                "project_id": str(SEED.primary_project),
+                "template_id": str(SEED.primary_template),
+                "ops": ops,
+            },
+        )
+    )
+    assert body["status"] == "draft_saved_unpublished"
+    assert [a["section_id"] for a in body["applied"]] == [str(section_id)]
 
 
 async def test_row_guard_not_found_has_op_index_and_no_row(
@@ -549,6 +728,8 @@ async def test_row_guard_not_found_has_op_index_and_no_row(
     payload = error_payload(result)
     assert payload["code"] == "NOT_FOUND"
     assert payload["op_index"] == 1
+    assert "project_name" not in payload
+    assert "template_name" not in payload
     assert await _label_set(db_session, template_id) == before_fields
     assert await draft_lock_holder(db_session, template_id) is None
     after_count = (
@@ -589,6 +770,7 @@ async def test_deadlock_maps_to_retry(
     payload = error_payload(result)
     assert payload["code"] == "RETRY"
     assert payload["retryable"] is True
+    _assert_named(payload, await _names(db_session, project_id, template_id))
     row = (
         await db_session.execute(
             text(
@@ -937,3 +1119,51 @@ async def test_non_ascii_draft_diff_stays_within_the_result_cap(
     assert body["diff"]["changes_truncated"] is True
     assert body["diff"]["changes"]
     assert len(compact_json(body)) <= RESULT_CAP
+
+
+@pytest.mark.parametrize(
+    ("op_builder", "code"),
+    [
+        (
+            lambda section_id, _field_id: [
+                {"op": "add_question", "section_id": section_id, "label": "Q", "type": "rating"}
+            ],
+            "INVALID_ARGUMENT",
+        ),
+        (lambda _section_id, _field_id: [{"op": "delete_question"}], "OP_NOT_ALLOWED_VIA_AGENT"),
+        (
+            lambda _section_id, field_id: [
+                {"op": "update_question", "field_id": field_id, "type": "number"}
+            ],
+            "OP_NOT_ALLOWED_VIA_AGENT",
+        ),
+        (
+            lambda section_id, _field_id: [
+                {"op": "add_question", "section_id": section_id, "label": f"Q{i}", "type": "text"}
+                for i in range(26)
+            ],
+            "TOO_MANY_OPS",
+        ),
+    ],
+    ids=["invalid_argument", "op_not_allowed", "locked_key", "too_many_ops"],
+)
+async def test_post_membership_refusals_carry_names(
+    mcp_client, pat_primary_rw, db_session: AsyncSession, op_builder: Any, code: str
+) -> None:
+    project_id, template_id, schema = await fresh_charms(db_session)
+    section_id, field_id = _section_and_field(schema)
+
+    payload = error_payload(
+        await call_tool(
+            mcp_client,
+            pat_primary_rw,
+            "edit_template_draft",
+            {
+                "project_id": str(project_id),
+                "template_id": str(template_id),
+                "ops": op_builder(section_id, field_id),
+            },
+        )
+    )
+    assert payload["code"] == code
+    _assert_named(payload, await _names(db_session, project_id, template_id))

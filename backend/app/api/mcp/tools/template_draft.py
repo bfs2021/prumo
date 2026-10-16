@@ -29,10 +29,12 @@ from app.api.mcp.errors import (
     McpToolError,
     reject_nul,
     validation_failure,
+    with_names,
 )
 from app.api.mcp.server import agent_tool
 from app.api.v1.endpoints._integrity import is_deadlock
 from app.core.config import settings
+from app.schemas.hitl_session import TemplateConfigDiffRead
 from app.schemas.mcp_template_draft import (
     AddQuestionOp,
     AppliedQuestion,
@@ -46,6 +48,7 @@ from app.services.agent_template_draft_service import (
     DraftOpError,
     NarrowBaselineError,
 )
+from app.services.project_read_service import project_name
 from app.services.project_template_active_service import (
     ProjectTemplateNotFoundError,
     owned_template,
@@ -63,6 +66,7 @@ from app.services.template_versioning import (
 )
 from app.utils.compact_json import RESULT_CAP, compact_json
 from app.utils.json_schema import inline_json_schema
+from app.utils.text_caps import cap_text
 
 _TOOL = "edit_template_draft"
 MAX_OPS = 25
@@ -93,6 +97,17 @@ _LOCKED_KEY_NEXT_STEP = (
     "resend update_question with only the editable_fields listed here; "
     "change type or options in the prumo UI"
 )
+# NarrowBaselineError.reason -> (message, next_step): each names its own fix.
+_NARROW_BASELINE = {
+    "pinned_empty_version": (
+        "The published version of this template is empty and a run is pinned to it.",
+        "publish the current draft in prumo so runs move to a version with questions, then retry",
+    ),
+    "legacy_snapshot": (
+        "The published version of this template uses an older format.",
+        "publish once in prumo to refresh the published version, then retry",
+    ),
+}
 _NEXT_STEP = (
     "Saved as an unpublished draft. A manager must click Publish in prumo before "
     "reviewers or AI extraction see it."
@@ -101,6 +116,8 @@ _DESCRIPTION = (
     "Add a question to a section, or reword an existing one, in a project template's "
     "unpublished draft. Never report a question as live -- it stays invisible "
     "to reviewers and to AI extraction until a project manager clicks Publish in prumo. "
+    "A select or multiselect question takes options as [{value?, label}]; a missing value "
+    "becomes the trimmed label, and values must be unique. "
     "After a RETRY or DUPLICATE_NAME error, call get_template before resending an "
     "add_question: it is not idempotent and may have partially applied. At most 25 ops "
     "per call."
@@ -132,13 +149,64 @@ async def edit_template_draft(
     except ProjectTemplateNotFoundError:
         await refuse(db, scope, McpToolError(McpErrorCode.NOT_FOUND, NOT_FOUND_MESSAGE))
 
-    applied: list[AppliedDraftOp] = []
+    # Membership and ownership are proven: refusals from here on name both,
+    # read now because a refusal's rollback expires every loaded row.
+    names = {"project_name": await project_name(db, project_id), "template_name": template.name}
+    editor_tab = _EDITOR_TAB[template.kind]
+    try:
+        applied, diff = await _apply(db, scope, project_id, template_id, ops)
+    except McpToolError as error:
+        await refuse(db, scope, with_names(error, **names))
+
+    result = EditTemplateDraftResult(
+        status="draft_saved_unpublished",
+        visible_to_reviewers_and_ai=False,
+        project_name=cap_text(names["project_name"])[0],
+        template_name=cap_text(names["template_name"])[0],
+        applied=[
+            AppliedQuestion(
+                op_index=a.op_index,
+                op=a.op,
+                field_id=a.field.id,
+                section_id=a.field.entity_type_id,
+                section_label=cap_text(a.section_label)[0],
+                name=a.field.name,
+                label=a.field.label,
+            )
+            for a in applied
+        ],
+        diff=capped_diff(diff, budget=0),  # placeholder: measures the rest of the result
+        draft_fingerprint=diff.fingerprint,
+        editor_url=f"{settings.PUBLIC_APP_URL.rstrip('/')}/projects/{project_id}?{editor_tab}",
+        next_step=_NEXT_STEP,
+    )
+    # The diff gets whatever the result cap leaves after everything else
+    # (measured with the row-less diff above, whose own fixed part the
+    # budget then re-counts).
+    rest = len(compact_json(result.model_dump(mode="json"))) - len(
+        compact_json(result.diff.model_dump(mode="json"))
+    )
+    return result.model_copy(update={"diff": capped_diff(diff, budget=RESULT_CAP - rest)})
+
+
+async def _apply(
+    db: AsyncSession,
+    scope: AuditScope,
+    project_id: UUID,
+    template_id: UUID,
+    ops: list[dict[str, Any]],
+) -> tuple[list[AppliedDraftOp], TemplateConfigDiffRead]:
+    """Steps 2-5 and the applied row; every audited refusal surfaces as McpToolError."""
     try:
         parsed = _parse_ops(ops)  # 2, 3
-        await _assert_baseline(db, template_id)  # 4
+        # Claim before the baseline check: the claim's UPDATE row-locks the
+        # template, and create_run takes that row FOR SHARE, so no run can pin
+        # the (empty) active version between the pinned-run check and commit.
+        # A refusal below rolls the claim back.
         await claim_draft_lock(
             db, project_id=project_id, template_id=template_id, user_id=current_principal().user_sub
-        )  # 5
+        )  # 4
+        await _assert_baseline(db, template_id)  # 5
         applied = await agent_template_draft_service.apply_draft_ops(
             db, project_id=project_id, template_id=template_id, ops=parsed
         )
@@ -150,61 +218,26 @@ async def edit_template_draft(
             after={"ops": [_applied_json(a) for a in applied]},
         )
         await db.commit()  # inside the try: a commit-time deadlock is an audited RETRY
-    except McpToolError as error:
-        await refuse(db, scope, error)
     except DraftLockHeldError as exc:
-        await refuse(
-            db,
-            scope,
-            McpToolError(
-                McpErrorCode.DRAFT_LOCK_HELD,
-                "Another manager is editing this draft.",
-                holder_name=(exc.details or {}).get("holder_name"),
-                untrusted_content=True,
-                untrusted_fields=["holder_name"],
-            ),
-        )
+        raise McpToolError(
+            McpErrorCode.DRAFT_LOCK_HELD,
+            "Another manager is editing this draft.",
+            holder_name=(exc.details or {}).get("holder_name"),
+            untrusted_content=True,
+            untrusted_fields=["holder_name"],
+        ) from exc
     except DraftOpError as exc:
         mapped_error = _op_failure(exc)
         if mapped_error is None:
             raise exc.cause from exc  # unmapped: INTERNAL_ERROR via the choke point, no row
-        await refuse(db, scope, mapped_error)
+        raise mapped_error from exc
     except DBAPIError as exc:  # the lock claim's UPDATE or the commit can lose a deadlock too
         if not is_deadlock(exc):
             raise
-        await refuse(
-            db,
-            scope,
-            McpToolError(McpErrorCode.RETRY, "A concurrent edit won; nothing was changed."),
-        )
-
-    result = EditTemplateDraftResult(
-        status="draft_saved_unpublished",
-        visible_to_reviewers_and_ai=False,
-        applied=[
-            AppliedQuestion(
-                op_index=a.op_index,
-                op=a.op,
-                field_id=a.field.id,
-                section_id=a.field.entity_type_id,
-                name=a.field.name,
-                label=a.field.label,
-            )
-            for a in applied
-        ],
-        diff=capped_diff(diff, budget=0),  # placeholder: measures the rest of the result
-        draft_fingerprint=diff.fingerprint,
-        editor_url=f"{settings.PUBLIC_APP_URL.rstrip('/')}/projects/{project_id}?"
-        f"{_EDITOR_TAB[template.kind]}",
-        next_step=_NEXT_STEP,
-    )
-    # The diff gets whatever the result cap leaves after everything else
-    # (measured with the row-less diff above, whose own fixed part the
-    # budget then re-counts).
-    rest = len(compact_json(result.model_dump(mode="json"))) - len(
-        compact_json(result.diff.model_dump(mode="json"))
-    )
-    return result.model_copy(update={"diff": capped_diff(diff, budget=RESULT_CAP - rest)})
+        raise McpToolError(
+            McpErrorCode.RETRY, "A concurrent edit won; nothing was changed."
+        ) from exc
+    return applied, diff
 
 
 def _parse_ops(ops: list[dict[str, Any]]) -> list[DraftOp]:
@@ -252,9 +285,8 @@ async def _assert_baseline(db: AsyncSession, template_id: UUID) -> None:
             McpErrorCode.NO_PUBLISHED_VERSION, "A manager must publish this template first."
         ) from exc
     except NarrowBaselineError as exc:
-        raise McpToolError(
-            McpErrorCode.NARROW_BASELINE, "Publish this template once in prumo, then retry."
-        ) from exc
+        message, next_step = _NARROW_BASELINE[exc.reason]
+        raise McpToolError(McpErrorCode.NARROW_BASELINE, message, next_step=next_step) from exc
 
 
 def _op_failure(exc: DraftOpError) -> McpToolError | None:

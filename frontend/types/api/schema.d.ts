@@ -1495,7 +1495,8 @@ export interface paths {
          *     Whitespace-only normalizes to NULL (nothing injected). Nothing
          *     republishes here — the text reaches snapshots, prompts and
          *     editable-stage runs when the manager presses Publish
-         *     (``republish-version``).
+         *     (``republish-version``). Like every draft edit it claims the draft
+         *     lock first: another manager's lock refuses with 409 ``DRAFT_LOCK_HELD``.
          */
         put: operations["update_template_llm_instruction_api_v1_projects__project_id__templates__template_id__llm_instruction_put"];
         post?: never;
@@ -3575,12 +3576,12 @@ export interface components {
          * ChangeVariant
          * @description The shape of one row — the client's discriminator (D1).
          *
-         *     One member per reachable ``(kind, node_kind[, option polarity])`` the
+         *     One member per reachable ``(kind, node_kind[, option add/remove/rename])`` the
          *     engine can emit, so a renderer never has to re-derive which of the
          *     engine's overloaded fields are meaningful.
          * @enum {string}
          */
-        ChangeVariant: "template_instruction_added" | "template_instruction_removed" | "template_instruction_modified" | "entity_type_added" | "entity_type_removed" | "entity_type_modified" | "entity_type_fields_reordered" | "field_added" | "field_removed" | "field_moved" | "field_modified" | "field_option_added" | "field_option_removed" | "field_options_reordered";
+        ChangeVariant: "template_instruction_added" | "template_instruction_removed" | "template_instruction_modified" | "entity_type_added" | "entity_type_removed" | "entity_type_modified" | "entity_type_fields_reordered" | "field_added" | "field_removed" | "field_moved" | "field_modified" | "field_option_added" | "field_option_removed" | "field_option_renamed" | "field_options_reordered";
         /** CloneTemplateRequest */
         CloneTemplateRequest: {
             /**
@@ -5122,6 +5123,18 @@ export interface components {
             run_id: string;
             run_view?: components["schemas"]["RunViewResponse"] | null;
         };
+        /**
+         * OptionItem
+         * @description One select/multiselect option: ``value`` is the stored code an answer
+         *     carries, ``label`` what a person reads. Renaming an option changes only
+         *     its label.
+         */
+        OptionItem: {
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
+        };
         /** ParserSettingsPayload */
         ParserSettingsPayload: {
             /**
@@ -5303,7 +5316,7 @@ export interface components {
             /** Allowed Units */
             allowed_units?: string[] | null;
             /** Allowed Values */
-            allowed_values?: string[] | null;
+            allowed_values?: components["schemas"]["OptionItem"][] | null;
             /**
              * Allows No Information
              * @default true
@@ -6168,7 +6181,7 @@ export interface components {
             /** Allowed Units */
             allowed_units?: unknown | null;
             /** Allowed Values */
-            allowed_values?: unknown | null;
+            allowed_values?: components["schemas"]["OptionItem"][] | null;
             /**
              * Allows No Information
              * @default true
@@ -6320,6 +6333,13 @@ export interface components {
             /** Reviewers Ready */
             reviewers_ready?: string[];
             run: components["schemas"]["RunSummaryResponse"];
+            /**
+             * Scope Rules
+             * @description Scope rules frozen in the run's pinned template version (QA runs only).
+             */
+            scope_rules?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * SaveCredentialsResponse
@@ -6965,7 +6985,7 @@ export interface components {
             /** Allowed Units */
             allowed_units?: string[] | null;
             /** Allowed Values */
-            allowed_values?: string[] | null;
+            allowed_values?: components["schemas"]["OptionItem"][] | null;
             /**
              * Allows No Information
              * @default true
@@ -7071,7 +7091,7 @@ export interface components {
             /** Allowed Units */
             allowed_units?: string[] | null;
             /** Allowed Values */
-            allowed_values?: string[] | null;
+            allowed_values?: components["schemas"]["OptionItem"][] | null;
             /**
              * Allows No Information
              * @default true
@@ -7182,7 +7202,7 @@ export interface components {
             /** Allowed Units */
             allowed_units?: string[] | null;
             /** Allowed Values */
-            allowed_values?: string[] | null;
+            allowed_values?: components["schemas"]["OptionItem"][] | null;
             /** Allows No Information */
             allows_no_information?: boolean | null;
             /** Allows Not Applicable */
@@ -10499,6 +10519,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiResponse_UpdateTemplateInstructionResponse_"];
+                };
+            };
+            /** @description Refused: draft lock conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateDraftLockRefusalResponse"];
                 };
             };
             /** @description Validation Error */

@@ -35,6 +35,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.llm.claim_value import option_label_map
 from app.models.article import Article
 from app.models.extraction import ExtractionEvidence, ExtractionInstance
 from app.models.extraction_workflow import ExtractionProposalSource, ExtractionReviewerDecisionType
@@ -61,6 +62,7 @@ from app.services.extraction_run_read_service import (
     is_run_arbitrator,
 )
 from app.services.extraction_snapshot import live_entity_types
+from app.services.mcp_value_render import McpFieldInfo, capped_values, mcp_value
 from app.services.template_versioning import (
     NoActiveTemplateVersionError,
     get_active_version_tree,
@@ -73,14 +75,14 @@ from app.utils.opaque_cursor import (
     decode_cursor,
     encode_cursor,
 )
-from app.utils.text_caps import cap_text, join_capped
+from app.utils.text_caps import cap_text
 
 _PAGE_BUDGET = 28_000
 _CONCISE_VALUE_CAP = 80
 _DETAILED_VALUE_CAP = 1_000
 _EVIDENCE_QUOTE_CAP = 300
 _EVIDENCE_PER_ROW_CAP = 3
-_CONCISE_JOIN_CAP = 1_000  # one value per instance: the join is bounded too (F4)
+_CONCISE_CELL_CAP = 1_000  # one value per instance: the cell is bounded too (F4)
 #: Reserved for `next_cursor` itself, same reasoning as `templates.py`: the
 #: envelope is measured with it `None`, but a non-last page replaces that
 #: with an opaque base64 cursor string a few chars longer.
@@ -196,19 +198,6 @@ class _Resolved:
     created_at: Any
     proposal_id: UUID | None
     decision_id: UUID | None
-
-
-def _short(value: Any, *, limit: int) -> str:
-    """`_short(value)` (spec §5.1): an absent-reason marker reads as "no
-    information"; otherwise the value envelope's own `value` key (or the raw
-    value, e.g. a legacy/AI shape with no envelope) -- lists joined with
-    ", ", everything else stringified and capped."""
-    if isinstance(value, dict) and value.get("absent_reason") is not None:
-        return "no information"
-    v = value.get("value", value) if isinstance(value, dict) else value
-    if isinstance(v, list):
-        v = ", ".join(str(x) for x in v)
-    return str(v)[:limit]
 
 
 def _coord_dicts(
@@ -383,6 +372,7 @@ def _evidence_for(
         out.append(
             McpEvidence(
                 quote=ev.text_content[:_EVIDENCE_QUOTE_CAP],
+                quote_truncated=len(ev.text_content) > _EVIDENCE_QUOTE_CAP,
                 locator=f"p{ev.page_number}" if ev.page_number is not None else None,
             )
         )
@@ -391,22 +381,28 @@ def _evidence_for(
 
 def _flatten_tree(
     tree: list[RunViewEntityType],
-) -> tuple[
-    dict[UUID, int], list[tuple[UUID, UUID, str, str]], dict[UUID, list[tuple[UUID, str, str]]]
-]:
+) -> tuple[dict[UUID, int], list[McpFieldInfo], dict[UUID, list[McpFieldInfo]]]:
     """Tree-order flattening shared by the question list, the concise
     per-field loop and the detailed per-instance loop: entity-type position
-    (for ordering an article's instances), the flat `(field_id, entity_type_id,
-    label, type)` rows in tree order, and those rows grouped back by
-    entity_type_id for the detailed per-instance walk."""
+    (for ordering an article's instances), the flat field infos in tree order,
+    and those infos grouped back by entity_type_id for the detailed
+    per-instance walk."""
     et_order: dict[UUID, int] = {}
-    rows: list[tuple[UUID, UUID, str, str]] = []
-    fields_by_et: dict[UUID, list[tuple[UUID, str, str]]] = defaultdict(list)
+    rows: list[McpFieldInfo] = []
+    fields_by_et: dict[UUID, list[McpFieldInfo]] = defaultdict(list)
     for et_pos, et in enumerate(tree):
         et_order[et.id] = et_pos
         for field in et.fields:
-            rows.append((field.id, et.id, field.label, field.field_type))
-            fields_by_et[et.id].append((field.id, field.label, field.field_type))
+            info = McpFieldInfo(
+                field_id=field.id,
+                et_id=et.id,
+                label=field.label,
+                field_type=field.field_type,
+                options=option_label_map(field.allowed_values),
+                unit=field.unit,
+            )
+            rows.append(info)
+            fields_by_et[et.id].append(info)
     return et_order, rows, fields_by_et
 
 
@@ -483,6 +479,7 @@ async def list_agent_extractions(
     *,
     project_id: UUID,
     template_id: UUID,
+    template_name: str,
     template_kind: str,
     caller_id: UUID,
     article_id: UUID | None,
@@ -517,9 +514,12 @@ async def list_agent_extractions(
         label_by_et = {et.id: et.label for et in tree}
         all_questions = [
             McpExtractionQuestion(
-                field_id=field_id, section_label=label_by_et[et_id], label=label, type=field_type
+                field_id=info.field_id,
+                section_label=label_by_et[info.et_id],
+                label=info.label,
+                type=info.field_type,
             )
-            for field_id, et_id, label, field_type in field_rows
+            for info in field_rows
         ]
         questions, questions_cost, questions_truncated = _bounded_questions(all_questions)
 
@@ -648,7 +648,8 @@ async def list_agent_extractions(
 
         if response_format == "concise":
             c_items: list[_ConcisePackItem] = []
-            for field_id, et_id, _label, _ftype in field_rows:
+            for info in field_rows:
+                field_id, et_id = info.field_id, info.et_id
                 resolved_lists = [
                     _resolve_reviewer_values(
                         inst.id,
@@ -667,10 +668,11 @@ async def list_agent_extractions(
                 if not resolved_lists:
                     continue
                 cells = [_concise_cell(group) for group in resolved_lists]
-                value_str = join_capped(
-                    [_short(c.value, limit=_CONCISE_VALUE_CAP) for c in cells],
-                    sep=" | ",
-                    cap=_CONCISE_JOIN_CAP,
+                cell_values, values_truncated = capped_values(
+                    [c.value for c in cells],
+                    info,
+                    text_cap=_CONCISE_VALUE_CAP,
+                    total_cap=_CONCISE_CELL_CAP,
                 )
                 human_groups = [group for group in resolved_lists if group[0].decider == "human"]
                 disagreement = None
@@ -683,7 +685,8 @@ async def list_agent_extractions(
                     _ConcisePackItem(
                         field_id=field_id,
                         cell=McpConciseCell(
-                            value=value_str,
+                            values=cell_values,
+                            values_truncated=values_truncated,
                             ai_only=all(c.ai_only for c in cells),
                             disagreement=disagreement,
                         ),
@@ -697,10 +700,10 @@ async def list_agent_extractions(
                 key=lambda i: (et_order.get(i.entity_type_id, 0), i.sort_order, str(i.id)),
             )
             for inst in sorted_instances:
-                for field_id, _label, _ftype in fields_by_et.get(inst.entity_type_id, []):
+                for info in fields_by_et.get(inst.entity_type_id, []):
                     for resolved in _resolve_reviewer_values(
                         inst.id,
-                        field_id,
+                        info.field_id,
                         published_by_coord=published_by_coord,
                         decisions_by_coord=decisions_by_coord,
                         human_by_coord=human_by_coord,
@@ -711,8 +714,8 @@ async def list_agent_extractions(
                         d_items.append(
                             McpDetailedRow(
                                 instance_id=inst.id,
-                                field_id=field_id,
-                                value=_short(resolved.value, limit=_DETAILED_VALUE_CAP),
+                                field_id=info.field_id,
+                                value=mcp_value(resolved.value, info, text_cap=_DETAILED_VALUE_CAP),
                                 decider=resolved.decider,
                                 reviewer=resolved.reviewer,
                                 evidence=_evidence_for(
@@ -777,6 +780,7 @@ async def list_agent_extractions(
 
     return McpExtractionsPage(
         template_id=template_id,
+        template_name=cap_text(template_name)[0],
         response_format=response_format,
         questions=questions,
         questions_truncated=questions_truncated,

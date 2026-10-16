@@ -1331,7 +1331,7 @@ async def test_alembic_head_is_expected_revision(migration_db_url: str) -> None:
     out = _run_alembic("current", database_url=migration_db_url)
     # ``alembic current`` prints either ``<revision> (head)`` or just the id;
     # match the revision we expect to live at head.
-    expected_head = "0083_mcp_oauth"
+    expected_head = "0086_evidence_idx_hitl_fk"
     assert expected_head in out, f"Expected head revision {expected_head!r}, got:\n{out}"
 
 
@@ -2085,4 +2085,139 @@ async def test_migration_0083_mcp_oauth_roundtrip(
             "DELETE FROM auth.users WHERE id = :u",
         ):
             await session.execute(text(sql), {"u": str(user_id), "p": str(project_id)})
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_migration_0084_canonical_options_roundtrip(migration_db_url: str) -> None:
+    """Data-only and forward-only: the downgrade is a no-op, and the upgrade
+    re-runs cleanly over rows that are already canonical."""
+    try:
+        _run_alembic("downgrade", "0083_mcp_oauth", database_url=migration_db_url)
+        assert "0083_mcp_oauth" in _run_alembic("current", database_url=migration_db_url)
+    finally:
+        _run_alembic("upgrade", "head", database_url=migration_db_url)
+    assert "(head)" in _run_alembic("current", database_url=migration_db_url)
+
+
+@pytest.mark.asyncio
+async def test_migration_0085_freeze_qa_rules_roundtrip(migration_db_url: str) -> None:
+    """Data-only: the downgrade strips the rules keys, the re-upgrade
+    backfills them again from the templates' current rules."""
+    try:
+        _run_alembic("downgrade", "0084_canonical_field_options", database_url=migration_db_url)
+        assert "0084_canonical_field_options" in _run_alembic(
+            "current", database_url=migration_db_url
+        )
+    finally:
+        _run_alembic("upgrade", "head", database_url=migration_db_url)
+    assert "(head)" in _run_alembic("current", database_url=migration_db_url)
+
+
+_0086_INDEXES = (
+    "idx_extraction_evidence_proposal_record_id",
+    "idx_extraction_evidence_reviewer_decision_id",
+    "idx_extraction_evidence_consensus_decision_id",
+)
+_0086_FKS = ("fk_hitl_configs_scope_project", "fk_hitl_configs_scope_template")
+_0086_COLUMNS = ("scope_project_id", "scope_template_id")
+
+
+@pytest.mark.asyncio
+async def test_migration_0086_evidence_idx_hitl_fk_roundtrip(
+    migration_db_url: str, migration_session: AsyncSession
+) -> None:
+    """Downgrade drops the evidence indexes, the scope FKs and columns; the
+    re-upgrade deletes orphan configs of both scope kinds planted while
+    downgraded and ties the surviving rows to their project or template."""
+    user_id, project_id, template_id = uuid4(), uuid4(), uuid4()
+    live_project_cfg, live_template_cfg = uuid4(), uuid4()
+    orphan_project_cfg, orphan_template_cfg = uuid4(), uuid4()
+    session = migration_session
+
+    async def names(sql: str, values: tuple[str, ...]) -> set[str]:
+        found = set((await session.execute(text(sql), {"n": list(values)})).scalars().all())
+        await session.rollback()
+        return found
+
+    async def schema() -> tuple[set[str], set[str], set[str]]:
+        return (
+            await names(
+                "SELECT indexname FROM pg_indexes WHERE indexname = ANY(:n)", _0086_INDEXES
+            ),
+            await names("SELECT conname FROM pg_constraint WHERE conname = ANY(:n)", _0086_FKS),
+            await names(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public'"
+                " AND table_name = 'extraction_hitl_configs' AND column_name = ANY(:n)",
+                _0086_COLUMNS,
+            ),
+        )
+
+    at_head = (set(_0086_INDEXES), set(_0086_FKS), set(_0086_COLUMNS))
+    assert await schema() == at_head
+    ids = {
+        "u": str(user_id),
+        "p": str(project_id),
+        "t": str(template_id),
+        "cp": str(live_project_cfg),
+        "ct": str(live_template_cfg),
+        "op": str(orphan_project_cfg),
+        "ot": str(orphan_template_cfg),
+    }
+    try:
+        _run_alembic("downgrade", "0085_freeze_qa_rules", database_url=migration_db_url)
+        try:
+            assert await schema() == (set(), set(), set())
+            for sql in (
+                "INSERT INTO auth.users (id, email, instance_id, aud, role) VALUES (:u,"
+                " 'hitl-0086@test.local', '00000000-0000-0000-0000-000000000000',"
+                " 'authenticated', 'authenticated')",
+                "INSERT INTO public.profiles (id, email) VALUES (:u, 'hitl-0086@test.local')",
+                "INSERT INTO public.projects (id, name, created_by_id, is_active)"
+                " VALUES (:p, 'HITL 0086 Project', :u, true)",
+                "INSERT INTO public.project_extraction_templates (id, project_id, name,"
+                " framework, version, kind, schema, is_active, created_by) VALUES (:t, :p,"
+                " 'hitl-0086-template', 'CUSTOM', '1.0', 'extraction', '{}'::jsonb, false, :u)",
+                # Deferred invariant: every project template needs an active version.
+                "INSERT INTO public.extraction_template_versions (id, project_template_id,"
+                " version, schema, published_by, is_active) VALUES (gen_random_uuid(), :t, 1,"
+                " '{\"entity_types\": []}'::jsonb, :u, true)",
+                "INSERT INTO public.extraction_hitl_configs (id, scope_kind, scope_id,"
+                " reviewer_count, consensus_rule) VALUES (:cp, 'project', :p, 2, 'majority'),"
+                " (:ct, 'template', :t, 1, 'unanimous'), (:op, 'project', :op, 1, 'unanimous'),"
+                " (:ot, 'template', :ot, 1, 'unanimous')",
+            ):
+                await session.execute(text(sql), ids)
+            await session.commit()
+        finally:
+            _run_alembic("upgrade", "head", database_url=migration_db_url)
+        assert "(head)" in _run_alembic("current", database_url=migration_db_url)
+        assert await schema() == at_head
+        rows = {
+            row.id: (row.scope_project_id, row.scope_template_id)
+            for row in (
+                await session.execute(
+                    text(
+                        "SELECT id, scope_project_id, scope_template_id"
+                        " FROM public.extraction_hitl_configs WHERE id IN (:cp, :ct, :op, :ot)"
+                    ),
+                    ids,
+                )
+            ).all()
+        }
+        await session.rollback()
+        assert rows == {
+            live_project_cfg: (project_id, None),
+            live_template_cfg: (None, template_id),
+        }
+    finally:
+        await session.rollback()
+        for sql in (
+            "DELETE FROM public.extraction_hitl_configs WHERE id IN (:cp, :ct, :op, :ot)",
+            "DELETE FROM public.project_extraction_templates WHERE id = :t",
+            "DELETE FROM public.projects WHERE id = :p",
+            "DELETE FROM public.profiles WHERE id = :u",
+            "DELETE FROM auth.users WHERE id = :u",
+        ):
+            await session.execute(text(sql), ids)
         await session.commit()

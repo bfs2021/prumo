@@ -8,11 +8,11 @@ from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.extraction import ExtractionField
+from app.models.extraction import ExtractionField, ExtractionRun
 from app.repositories.extraction_template_version_repository import (
     ExtractionTemplateVersionRepository,
 )
@@ -23,7 +23,7 @@ from app.schemas.template_structure import (
     TemplateFieldUpdateRequest,
 )
 from app.services import template_field_naming, template_field_service
-from app.services.extraction_snapshot import snapshot_is_narrow
+from app.services.extraction_snapshot import baseline_isolated_for_agent
 from app.services.template_field_service import (
     DuplicateFieldNameError,
     EntityTypeNotFoundError,
@@ -49,8 +49,18 @@ _OP_ERRORS = (
 _UPDATE_COLUMN = {"label": "label", "description": "description", "instructions": "llm_description"}
 
 
+NarrowBaselineReason = Literal["pinned_empty_version", "legacy_snapshot"]
+
+
 class NarrowBaselineError(Exception):
-    """The active version is narrow: runs chain to live rows, so a draft edit would leak."""
+    """The active version is narrow: runs chain to live rows, so a draft edit would leak.
+
+    ``reason`` names which case: an empty version a run is pinned to, or a
+    snapshot older than the wide format."""
+
+    def __init__(self, reason: NarrowBaselineReason) -> None:
+        super().__init__(f"The active version is not isolated: {reason}.")
+        self.reason: NarrowBaselineReason = reason
 
 
 class DraftOpError(Exception):
@@ -69,28 +79,35 @@ class AppliedDraftOp:
     op_index: int
     op: Literal["add_question", "update_question"]
     field: TemplateFieldRead
+    section_label: str
     before: dict[str, Any] | None
 
 
 async def assert_isolated_baseline(db: AsyncSession, *, template_id: UUID) -> None:
-    """Refuse a draft edit unless the active version is a wide, isolated snapshot.
+    """Refuse a draft edit unless the active version isolates runs from the live rows.
 
     A narrow snapshot chains a run to the LIVE rows (spec §2), so editing the
-    live structure would leak the draft to any run still pinned to it before a
-    manager publishes.
+    live structure would leak the draft to any run pinned to it before a
+    manager publishes. An empty version (a blank template) passes while no
+    run is pinned to it.
     """
     active = await ExtractionTemplateVersionRepository(db).get_active(template_id)
     if active is None:
         raise NoActiveTemplateVersionError(f"Project template {template_id} has no active version.")
-    # Hand snapshot_is_narrow the entity_types LIST: the whole dict reads narrow for every template.
-    if snapshot_is_narrow((active.schema_ or {}).get("entity_types") or []):
-        raise NarrowBaselineError(f"Project template {template_id} has a narrow active version.")
+    # The entity_types LIST, never the whole dict: the dict reads narrow for every template.
+    entity_types = (active.schema_ or {}).get("entity_types") or []
+    pinned = (
+        await db.execute(select(exists().where(ExtractionRun.version_id == active.id)))
+    ).scalar_one()
+    if not baseline_isolated_for_agent(entity_types, pinned_run_exists=pinned):
+        raise NarrowBaselineError("pinned_empty_version" if not entity_types else "legacy_snapshot")
 
 
 async def _add(
     db: AsyncSession, project_id: UUID, template_id: UUID, index: int, op: AddQuestionOp
 ) -> AppliedDraftOp:
-    await owned_section(db, template_id=template_id, section_id=op.section_id)
+    section = await owned_section(db, template_id=template_id, section_id=op.section_id)
+    section_label = section.label
     taken = set(
         (
             await db.execute(
@@ -110,14 +127,16 @@ async def _add(
         name=template_field_naming.derive_field_name(op.label, taken),
         label=op.label,
         field_type=op.type,
-        allowed_values=op.options,
+        allowed_values=[o.to_option_item() for o in op.options] if op.options else None,
         llm_description=op.instructions,
         sort_order=sort_order,
     )
     field = await template_field_service.create_field(
         db, project_id=project_id, template_id=template_id, payload=payload
     )
-    return AppliedDraftOp(op_index=index, op="add_question", field=field, before=None)
+    return AppliedDraftOp(
+        op_index=index, op="add_question", field=field, section_label=section_label, before=None
+    )
 
 
 async def _update(
@@ -128,13 +147,21 @@ async def _update(
         db, template_id=template_id, field_id=op.field_id
     )
     before = {key: getattr(row, _UPDATE_COLUMN[key]) for key in sent}
+    section = await owned_section(db, template_id=template_id, section_id=row.entity_type_id)
+    section_label = section.label
     payload = TemplateFieldUpdateRequest(
         **{_UPDATE_COLUMN[key]: value for key, value in sent.items()}
     )
     field = await template_field_service.update_field(
         db, project_id=project_id, template_id=template_id, field_id=op.field_id, payload=payload
     )
-    return AppliedDraftOp(op_index=index, op="update_question", field=field, before=before)
+    return AppliedDraftOp(
+        op_index=index,
+        op="update_question",
+        field=field,
+        section_label=section_label,
+        before=before,
+    )
 
 
 async def apply_draft_ops(

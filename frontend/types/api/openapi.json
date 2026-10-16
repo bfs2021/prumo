@@ -4252,7 +4252,7 @@
         "type": "string"
       },
       "ChangeVariant": {
-        "description": "The shape of one row \u2014 the client's discriminator (D1).\n\nOne member per reachable ``(kind, node_kind[, option polarity])`` the\nengine can emit, so a renderer never has to re-derive which of the\nengine's overloaded fields are meaningful.",
+        "description": "The shape of one row \u2014 the client's discriminator (D1).\n\nOne member per reachable ``(kind, node_kind[, option add/remove/rename])`` the\nengine can emit, so a renderer never has to re-derive which of the\nengine's overloaded fields are meaningful.",
         "enum": [
           "template_instruction_added",
           "template_instruction_removed",
@@ -4267,6 +4267,7 @@
           "field_modified",
           "field_option_added",
           "field_option_removed",
+          "field_option_renamed",
           "field_options_reordered"
         ],
         "title": "ChangeVariant",
@@ -7430,6 +7431,30 @@
         "title": "OpenHITLSessionResponse",
         "type": "object"
       },
+      "OptionItem": {
+        "additionalProperties": false,
+        "description": "One select/multiselect option: ``value`` is the stored code an answer\ncarries, ``label`` what a person reads. Renaming an option changes only\nits label.",
+        "properties": {
+          "label": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "OptionItem",
+        "type": "object"
+      },
       "ParserSettingsPayload": {
         "properties": {
           "type": {
@@ -7777,7 +7802,7 @@
             "anyOf": [
               {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/OptionItem"
                 },
                 "maxItems": 100,
                 "minItems": 1,
@@ -9657,7 +9682,12 @@
           },
           "allowed_values": {
             "anyOf": [
-              {},
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OptionItem"
+                },
+                "type": "array"
+              },
               {
                 "type": "null"
               }
@@ -9984,6 +10014,19 @@
           },
           "run": {
             "$ref": "#/components/schemas/RunSummaryResponse"
+          },
+          "scope_rules": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Scope rules frozen in the run's pinned template version (QA runs only).",
+            "title": "Scope Rules"
           }
         },
         "required": [
@@ -11367,7 +11410,7 @@
             "anyOf": [
               {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/OptionItem"
                 },
                 "maxItems": 100,
                 "minItems": 1,
@@ -11590,7 +11633,7 @@
             "anyOf": [
               {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/OptionItem"
                 },
                 "type": "array"
               },
@@ -11835,7 +11878,7 @@
             "anyOf": [
               {
                 "items": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/OptionItem"
                 },
                 "maxItems": 100,
                 "minItems": 1,
@@ -17440,7 +17483,7 @@
         ]
       },
       "put": {
-        "description": "Stage the instruction as a draft edit (slice B-4).\n\nWhitespace-only normalizes to NULL (nothing injected). Nothing\nrepublishes here \u2014 the text reaches snapshots, prompts and\neditable-stage runs when the manager presses Publish\n(``republish-version``).",
+        "description": "Stage the instruction as a draft edit (slice B-4).\n\nWhitespace-only normalizes to NULL (nothing injected). Nothing\nrepublishes here \u2014 the text reaches snapshots, prompts and\neditable-stage runs when the manager presses Publish\n(``republish-version``). Like every draft edit it claims the draft\nlock first: another manager's lock refuses with 409 ``DRAFT_LOCK_HELD``.",
         "operationId": "update_template_llm_instruction_api_v1_projects__project_id__templates__template_id__llm_instruction_put",
         "parameters": [
           {
@@ -17484,6 +17527,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateDraftLockRefusalResponse"
+                }
+              }
+            },
+            "description": "Refused: draft lock conflict"
           },
           "422": {
             "content": {
