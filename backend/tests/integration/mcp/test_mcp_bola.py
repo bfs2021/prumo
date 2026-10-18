@@ -200,6 +200,48 @@ BOLA_CASES = [
         "SCOPE_INSUFFICIENT",
         id="edit_template_draft-read-token",
     ),
+    pytest.param(
+        "pat_outsider_rw",
+        "get_review_question",
+        {"project_id": str(SEED.primary_project)},
+        "NOT_FOUND",
+        id="get_review_question-outsider-on-foreign-project",
+    ),
+    pytest.param(
+        "pat_outsider_rw",
+        "list_template_catalogue",
+        {"project_id": str(SEED.primary_project), "kind": "extraction"},
+        "NOT_FOUND",
+        id="list_template_catalogue-outsider-on-foreign-project",
+    ),
+    pytest.param(
+        "pat_outsider_rw",
+        "get_setup_readiness",
+        {"project_id": str(SEED.primary_project)},
+        "NOT_FOUND",
+        id="get_setup_readiness-outsider-on-foreign-project",
+    ),
+    pytest.param(
+        "pat_outsider_rw",
+        "set_review_question",
+        {"project_id": str(SEED.primary_project), "expected_revision": 1, "picots_enabled": True},
+        "NOT_FOUND",
+        id="set_review_question-outsider-on-foreign-project",
+    ),
+    pytest.param(
+        "pat_reviewer_rw",
+        "set_review_question",
+        {"project_id": str(SEED.primary_project), "expected_revision": 1, "picots_enabled": True},
+        "MANAGER_REQUIRED",
+        id="set_review_question-reviewer-not-manager",
+    ),
+    pytest.param(
+        "pat_primary_read",
+        "set_review_question",
+        {"project_id": str(SEED.primary_project), "expected_revision": 1, "picots_enabled": True},
+        "SCOPE_INSUFFICIENT",
+        id="set_review_question-read-token",
+    ),
 ]
 
 
@@ -534,6 +576,10 @@ def _coordinate_cases(b_article: str, b_template: str, b_section: str) -> dict[s
             "template_id": b_template,
             "ops": [{"op": "add_question", "section_id": b_section, "label": "Q", "type": "text"}],
         },
+        "get_review_question": {"project_id": b},
+        "list_template_catalogue": {"project_id": b, "kind": "extraction"},
+        "get_setup_readiness": {"project_id": b},
+        "set_review_question": {"project_id": b, "expected_revision": 1, "picots_enabled": True},
     }
 
 

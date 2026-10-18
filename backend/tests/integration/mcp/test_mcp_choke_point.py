@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -16,15 +17,17 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.mcp import server
+from app.api.mcp.tools import template_draft
 from app.core.config import API_VERSION
-from tests.integration.conftest import SEED
+from tests.integration.conftest import SEED, IntegrationSeedIds
 from tests.integration.mcp.conftest import SeededPat, seed_oauth_principal
 
-# Tools allowed a destructive/open-world hint or a requiresUserInteraction meta.
 # INSTRUCTIONS length before the untrusted_fields paragraph: that paragraph
-# may spend at most 250 chars of the 2,048 budget later tools also need.
+# may spend at most 250 chars and the configuration (Setup) paragraph at most
+# 300 more of the 2,048 budget later tools also need.
 _PRE_HARDEN_INSTRUCTIONS_LEN = 1095
 
+# Tools allowed a destructive/open-world hint or a requiresUserInteraction meta.
 _HINT_ALLOWLIST: frozenset[str] = frozenset()
 
 
@@ -262,12 +265,13 @@ async def test_server_info_instructions_and_cache_hints(
         assert client.server_info.version == API_VERSION
         assert client.instructions is not None
         assert len(client.instructions) <= 2048
-        assert len(client.instructions) <= _PRE_HARDEN_INSTRUCTIONS_LEN + 250
+        assert len(client.instructions) <= _PRE_HARDEN_INSTRUCTIONS_LEN + 250 + 300
         assert "list_projects" in client.instructions
         assert "untrusted" in client.instructions
         assert "untrusted_fields" in client.instructions
         assert "nonce" in client.instructions
         assert "Publish" in client.instructions
+        assert "get_setup_readiness" in client.instructions
 
         result = await client.list_tools()
         assert result.ttl_ms == 3_600_000
@@ -424,7 +428,8 @@ async def test_tools_list_advertises_argument_bounds(
         op_names |= set(
             branch["properties"]["op"].get("enum", [branch["properties"]["op"].get("const")])
         )
-    assert op_names == {"add_question", "update_question"}
+    assert op_names == set(template_draft._ALLOWED_OPS)
+    assert len(op_names) == 10
 
     details = tools["update_project_details"].input_schema["properties"]
     for key in ("fields", "expected"):
@@ -493,6 +498,19 @@ async def test_no_tool_listing_cites_internal_spec_sections(
         assert "spec §" not in listing, tool.name
 
 
+async def test_descriptions_document_search_syntax(
+    mcp_client: Callable[[SeededPat], AbstractAsyncContextManager[Client]],
+    pat_primary_rw: SeededPat,
+) -> None:
+    async with mcp_client(pat_primary_rw) as client:
+        descriptions = {t.name: t.description or "" for t in (await client.list_tools()).tools}
+
+    assert "Words are ANDed" in descriptions["search_project_text"]
+    assert "case-insensitive substring" in descriptions["list_articles"]
+    assert "ai_only" in descriptions["get_extractions"]
+    assert "run.stage" in descriptions["get_extractions"]
+
+
 async def test_annotation_policy_is_pinned(
     mcp_client: Callable[[SeededPat], AbstractAsyncContextManager[Client]],
     pat_primary_rw: SeededPat,
@@ -514,3 +532,164 @@ async def test_annotation_policy_is_pinned(
     assert tools["update_project_details"].annotations.idempotent_hint is True
     assert tools["edit_template_draft"].annotations.idempotent_hint is False
     assert not any(w in n for n in tools for w in ("publish", "clone", "import"))
+
+
+# One minimal valid edit_template_draft call per op on the seeded primary
+# template. Ops that delete or move carry an expected_fingerprint, so the
+# refusal under test (scope, role or lock) is what surfaces.
+_DRAFT_OP_CASES: dict[str, Callable[[IntegrationSeedIds], list[dict[str, Any]]]] = {
+    "add_question": lambda seed: [
+        {
+            "op": "add_question",
+            "section_id": str(seed.primary_entity_type),
+            "label": "Choke point Q",
+            "type": "text",
+        }
+    ],
+    "update_question": lambda seed: [
+        {"op": "update_question", "field_id": str(seed.primary_field), "label": "Choke point"}
+    ],
+    "delete_question": lambda seed: [
+        {"op": "delete_question", "field_id": str(seed.primary_field)}
+    ],
+    "move_question": lambda seed: [
+        {
+            "op": "move_question",
+            "field_id": str(seed.primary_field),
+            "section_id": str(seed.primary_entity_type),
+            "position": 0,
+        }
+    ],
+    "reorder_questions": lambda seed: [
+        {
+            "op": "reorder_questions",
+            "section_id": str(seed.primary_entity_type),
+            "field_ids": [str(seed.primary_field)],
+        }
+    ],
+    "set_options": lambda seed: [
+        {
+            "op": "set_options",
+            "field_id": str(seed.primary_field),
+            "options": [{"value": "y", "label": "Yes"}],
+        }
+    ],
+    "add_section": lambda _seed: [
+        {"op": "add_section", "label": "Choke point S", "cardinality": "one"}
+    ],
+    "update_section": lambda seed: [
+        {"op": "update_section", "section_id": str(seed.primary_entity_type), "label": "Choke"}
+    ],
+    "delete_section": lambda seed: [
+        {"op": "delete_section", "section_id": str(seed.primary_entity_type)}
+    ],
+    "set_instruction": lambda _seed: [{"op": "set_instruction", "instruction": "Choke point"}],
+}
+
+
+def _draft_op_args(op: str) -> dict[str, Any]:
+    return {
+        "project_id": str(SEED.primary_project),
+        "template_id": str(SEED.primary_template),
+        "ops": _DRAFT_OP_CASES[op](SEED),
+        "expected_fingerprint": "any",
+    }
+
+
+async def _template_state(db: AsyncSession) -> tuple[Any, frozenset[str]]:
+    holder = (
+        await db.execute(
+            text("SELECT config_draft_by FROM public.project_extraction_templates WHERE id = :t"),
+            {"t": str(SEED.primary_template)},
+        )
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            text(
+                "SELECT f.id, f.label, f.sort_order, f.entity_type_id "
+                "FROM public.extraction_fields f "
+                "JOIN public.extraction_entity_types et ON et.id = f.entity_type_id "
+                "WHERE et.project_template_id = :t"
+            ),
+            {"t": str(SEED.primary_template)},
+        )
+    ).all()
+    sections = (
+        await db.execute(
+            text(
+                "SELECT id, label, cardinality FROM public.extraction_entity_types "
+                "WHERE project_template_id = :t"
+            ),
+            {"t": str(SEED.primary_template)},
+        )
+    ).all()
+    instruction = (
+        await db.execute(
+            text(
+                "SELECT llm_template_instruction FROM public.project_extraction_templates "
+                "WHERE id = :t"
+            ),
+            {"t": str(SEED.primary_template)},
+        )
+    ).scalar_one()
+    return (holder, instruction), frozenset(
+        [f"{r.id}:{r.label}:{r.sort_order}:{r.entity_type_id}" for r in rows]
+        + [f"section:{r.id}:{r.label}:{r.cardinality}" for r in sections]
+    )
+
+
+def test_draft_op_cases_cover_every_allowed_op() -> None:
+    assert set(_DRAFT_OP_CASES) == set(template_draft._ALLOWED_OPS)
+
+
+async def _assert_draft_op_refused(
+    mcp_client: Callable[[SeededPat], AbstractAsyncContextManager[Client]],
+    pat: SeededPat,
+    db_session: AsyncSession,
+    op: str,
+    code: str,
+) -> None:
+    before = await _template_state(db_session)
+    async with mcp_client(pat) as client:
+        r = await client.call_tool("edit_template_draft", _draft_op_args(op))
+    assert r.is_error is True
+    assert r.structured_content is not None
+    assert r.structured_content["code"] == code
+    assert await _template_state(db_session) == before
+
+
+@pytest.mark.parametrize("op", sorted(_DRAFT_OP_CASES))
+async def test_draft_op_choke_point_read_token(
+    mcp_client: Callable[[SeededPat], AbstractAsyncContextManager[Client]],
+    pat_primary_read: SeededPat,
+    db_session: AsyncSession,
+    op: str,
+) -> None:
+    await _assert_draft_op_refused(
+        mcp_client, pat_primary_read, db_session, op, "SCOPE_INSUFFICIENT"
+    )
+
+
+@pytest.mark.parametrize("op", sorted(_DRAFT_OP_CASES))
+async def test_draft_op_choke_point_reviewer(
+    mcp_client: Callable[[SeededPat], AbstractAsyncContextManager[Client]],
+    pat_reviewer_rw: SeededPat,
+    db_session: AsyncSession,
+    op: str,
+) -> None:
+    await _assert_draft_op_refused(mcp_client, pat_reviewer_rw, db_session, op, "MANAGER_REQUIRED")
+
+
+@pytest.mark.parametrize("op", sorted(_DRAFT_OP_CASES))
+async def test_draft_op_choke_point_foreign_lock(
+    mcp_client: Callable[[SeededPat], AbstractAsyncContextManager[Client]],
+    pat_primary_rw: SeededPat,
+    db_session: AsyncSession,
+    op: str,
+) -> None:
+    await db_session.execute(
+        text("UPDATE public.project_extraction_templates SET config_draft_by = :r WHERE id = :t"),
+        {"r": str(SEED.reviewer_profile), "t": str(SEED.primary_template)},
+    )
+    await db_session.flush()
+    await _assert_draft_op_refused(mcp_client, pat_primary_rw, db_session, op, "DRAFT_LOCK_HELD")

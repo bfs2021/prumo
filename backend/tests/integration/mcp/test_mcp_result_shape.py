@@ -82,6 +82,8 @@ _TRUSTED_PATHS: dict[str, frozenset[str]] = {
         {
             "articles[].hits[].block_type",
             "articles[].hits[].locator",
+            "articles[].locators[].block_type",
+            "articles[].locators[].locator",
             "next_cursor",
             "note",
         }
@@ -103,10 +105,18 @@ _TRUSTED_PATHS: dict[str, frozenset[str]] = {
             "kind",
             "sections[].cardinality",
             "sections[].questions[].type",
+            "sections[].questions[].flags[]",
             "draft_diff.status",
             "draft_diff.changes[].tier",
             "draft_diff.changes[].variant",
             "draft_diff.changes[].attribute",
+            "draft_diff.fingerprint",
+            "fingerprint",
+            "status",
+            "changes[].tier",
+            "changes[].variant",
+            "changes[].attribute",
+            "note",
             "next_cursor",
         }
     ),
@@ -116,12 +126,17 @@ _TRUSTED_PATHS: dict[str, frozenset[str]] = {
             "diff.changes[].tier",
             "diff.changes[].variant",
             "diff.changes[].attribute",
+            "diff.fingerprint",
             "draft_fingerprint",
             "editor_url",
             "next_step",
         }
     ),
     "update_project_details": frozenset({"note"}),
+    "get_review_question": frozenset({"review_type", "slots{}.label", "note"}),
+    "set_review_question": frozenset({"review_type", "slots{}.label", "note"}),
+    "list_template_catalogue": frozenset({"next_step", "note"}),
+    "get_setup_readiness": frozenset({"items[].next_step"}),
 }
 _FLAG_FIELDS = frozenset({"untrusted_content", "untrusted_fields"})
 _PINNED_FORMATS = frozenset({"uuid", "date-time"})
@@ -205,6 +220,9 @@ async def test_read_results_carry_raw_text_and_the_untrusted_flag(
         "get_article_pdf": {"article_id": str(article)},
         "get_extractions": template,
         "get_template": template,
+        "get_review_question": project,
+        "list_template_catalogue": {**project, "kind": "extraction"},
+        "get_setup_readiness": project,
     }
     bodies = {}
     for name, args in calls.items():
