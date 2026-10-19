@@ -401,7 +401,7 @@ async def test_requires_user_interaction_renders_the_meta(
     assert tool.annotations is not None
     assert (tool.annotations.read_only_hint, tool.annotations.open_world_hint) == (False, True)
     assert all(
-        not (t.meta or {})
+        set(t.meta or {}) <= {"ui"}
         for name, t in tools.items()
         if name != "probe_prompted" and name not in _HINT_ALLOWLIST
     )
@@ -501,6 +501,7 @@ async def test_server_info_instructions_and_cache_hints(
         assert client.server_info.version == API_VERSION
         assert client.instructions is not None
         assert len(client.instructions) <= 2048
+        assert len(server.INSTRUCTIONS) == 1810  # pinned: later slices must not grow it
         assert len(client.instructions) <= _PRE_HARDEN_INSTRUCTIONS_LEN + 250 + 300 + 350
         assert "explicitly asks" in client.instructions
         assert "list_projects" in client.instructions
