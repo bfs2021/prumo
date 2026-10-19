@@ -26,7 +26,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "email-validator>=2.0.0",
     # Authentication
-    "pyjwt[crypto]>=2.10.0",
+    "pyjwt[crypto]>=2.15.0",
     "passlib[bcrypt]>=1.7.4",
     # HTTP Client
     "httpx>=0.27.0",
@@ -202,12 +202,26 @@ ignore_decorators = [
     "@event.listens_for",
     "@*.connect",
     "@agent_tool",
+    "@agent_prompt",
 ]
 # `cls` is the classmethod receiver Pydantic's @field_validator mandates —
 # a validator that ignores it still cannot drop the parameter, so the
 # finding is never actionable. `model_config` is the same story for the
 # Pydantic settings/schema declaration.
-ignore_names = ["model_config", "cls"]
+ignore_names = [
+    "model_config",
+    "cls",
+    # OAuth provider protocol: called by mcp.server.auth handlers, never by name
+    "get_client",
+    "register_client",
+    "authorize",
+    "load_authorization_code",
+    "exchange_authorization_code",
+    "load_refresh_token",
+    "exchange_refresh_token",
+    "load_access_token",
+    "revoke_token",
+]
 min_confidence = 60
 
 [tool.uv]

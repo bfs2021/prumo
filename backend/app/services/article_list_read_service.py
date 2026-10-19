@@ -15,7 +15,7 @@ from sqlalchemy import exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.article import Article, ArticleFile
-from app.models.extraction import ExtractionRun
+from app.models.project import Project
 from app.repositories.article_repository import ArticleFileRepository
 from app.schemas.mcp_articles import (
     McpArticleDetail,
@@ -25,10 +25,10 @@ from app.schemas.mcp_articles import (
     McpArticleTemplateStatus,
 )
 from app.services.article_read_service import ArticleNotFoundError
-from app.services.extraction_current_run import select_current_runs_by_article
+from app.services.current_run import CurrentRunResolver
 from app.services.project_read_service import template_summaries
-from app.utils.opaque_cursor import cursor_uuid, decode_cursor, encode_cursor
-from app.utils.text_caps import cap_text
+from app.utils.opaque_cursor import cursor_text, cursor_uuid, decode_cursor, encode_cursor
+from app.utils.text_caps import cap_json_weight, cap_text
 
 
 async def article_template_status(
@@ -38,29 +38,13 @@ async def article_template_status(
     extraction status). Reuses the shared current-run rule so this answer never
     disagrees with export or the HITL session path about which run is current."""
     templates = await template_summaries(db, project_id=project_id)
-    run_rows = (
-        (
-            await db.execute(
-                select(ExtractionRun).where(
-                    ExtractionRun.article_id == article_id,
-                    ExtractionRun.project_id == project_id,
-                )
-            )
-        )
-        .scalars()
-        .all()
+    current_by_template = await CurrentRunResolver(db).current_by_template(
+        project_id=project_id, article_id=article_id
     )
-
-    runs_by_template: dict[tuple[UUID, str], list[ExtractionRun]] = {}
-    for run in run_rows:
-        runs_by_template.setdefault((run.template_id, run.kind), []).append(run)
 
     statuses: list[McpArticleTemplateStatus] = []
     for summary in templates:
-        template_runs = runs_by_template.get((summary.template_id, summary.kind), [])
-        current = (
-            select_current_runs_by_article(template_runs).get(article_id) if template_runs else None
-        )
+        current = current_by_template.get(summary.template_id)
         statuses.append(
             McpArticleTemplateStatus(
                 template_id=summary.template_id,
@@ -78,7 +62,13 @@ async def article_template_status(
 _LIST_AUTHORS_CAP = 3
 _LIST_AUTHOR_CAP = 60
 _DETAIL_AUTHORS_CAP = 20
+# A char cap alone lets escaped text (control characters, 6 chars each in
+# `compact_json`) through at up to 6x its length: each author, each file's name and the abstract
+# are cut by serialized weight. 202 = 200 ASCII chars + quotes; 20 authors ~ 4k.
+_DETAIL_AUTHOR_WEIGHT = 202
+_FILENAME_WEIGHT = 202
 _ABSTRACT_CAP = 6_000
+_ABSTRACT_WEIGHT = 12_000
 
 
 def _escape_ilike(value: str) -> str:
@@ -147,7 +137,7 @@ async def list_project_articles(
 
     values = decode_cursor(cursor, arity=2)
     if values is not None:
-        cursor_title, cursor_id = str(values[0]), cursor_uuid(values[1])
+        cursor_title, cursor_id = cursor_text(values[0]), cursor_uuid(values[1])
         stmt = stmt.where(tuple_(Article.title, Article.id) > (cursor_title, cursor_id))
 
     stmt = stmt.order_by(Article.title, Article.id).limit(limit + 1)
@@ -183,25 +173,37 @@ def _capped(value: str | None) -> str | None:
 
 
 async def get_article_detail(db: AsyncSession, *, article_id: UUID) -> McpArticleDetail:
-    row = (await db.execute(select(Article).where(Article.id == article_id))).scalar_one_or_none()
-    if row is None:  # removed between the choke point's check and this read
+    found = (
+        await db.execute(
+            select(Article, Project.name)
+            .join(Project, Project.id == Article.project_id)
+            .where(Article.id == article_id)
+        )
+    ).one_or_none()
+    if found is None:  # removed between the choke point's check and this read
         raise ArticleNotFoundError(f"Article {article_id} not found")
+    row, project_name = found
 
     files = await ArticleFileRepository(db).list_for_article_ordered(article_id)
 
     abstract = row.abstract
     abstract_truncated = False
-    if abstract is not None and len(abstract) > _ABSTRACT_CAP:
-        abstract = abstract[:_ABSTRACT_CAP]
-        abstract_truncated = True
+    if abstract is not None:
+        abstract, cut_by_chars = cap_text(abstract, _ABSTRACT_CAP)
+        abstract, cut_by_weight = cap_json_weight(abstract, _ABSTRACT_WEIGHT)
+        abstract_truncated = cut_by_chars or cut_by_weight
 
     title, title_truncated = cap_text(row.title)
     return McpArticleDetail(
         article_id=row.id,
         project_id=row.project_id,
+        project_name=cap_text(project_name)[0],
         title=title,
         title_truncated=title_truncated,
-        authors=[cap_text(a)[0] for a in (row.authors or [])[:_DETAIL_AUTHORS_CAP]],
+        authors=[
+            cap_json_weight(a, _DETAIL_AUTHOR_WEIGHT)[0]
+            for a in (row.authors or [])[:_DETAIL_AUTHORS_CAP]
+        ],
         year=row.publication_year,
         journal_title=_capped(row.journal_title),
         doi=row.doi,
@@ -215,7 +217,11 @@ async def get_article_detail(db: AsyncSession, *, article_id: UUID) -> McpArticl
                 article_file_id=f.id,
                 role=f.file_role,
                 file_type=f.file_type,
-                original_filename=_capped(f.original_filename),
+                original_filename=(
+                    cap_json_weight(f.original_filename, _FILENAME_WEIGHT)[0]
+                    if f.original_filename is not None
+                    else None
+                ),
                 extraction_status=f.extraction_status,
                 created_at=f.created_at,
             )

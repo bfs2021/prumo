@@ -3,10 +3,15 @@
 `public.articles.title` (and `journal_title`, each author, a file's
 `original_filename`) is unbounded `Text`: every read tool that returns one
 cuts it here, so a single pathological row cannot push a result past the
-32,000-char cap (spec §5.1).
+32,000-char cap (spec §5.1). A char cap bounds weight only for text JSON
+leaves unescaped: `compact_json` renders a control character as a 6-char
+`\\uXXXX` escape (quotes and backslashes as 2), so a field whose char cap could still blow the result budget is cut
+by `cap_json_weight` instead.
 """
 
 from __future__ import annotations
+
+from app.utils.compact_json import compact_json
 
 TITLE_CAP = 200
 
@@ -19,7 +24,15 @@ def cap_text(value: str, cap: int = TITLE_CAP) -> tuple[str, bool]:
     return value[:cap], True
 
 
-def join_capped(values: list[str], *, sep: str, cap: int) -> str:
-    """`values` joined by `sep`, cut to `cap` chars plus a visible "…" mark."""
-    joined = sep.join(values)
-    return joined if len(joined) <= cap else joined[:cap] + "…"
+def cap_json_weight(value: str, budget: int) -> tuple[str, bool]:
+    """The longest prefix of `value` whose `compact_json` rendering (quotes
+    included) is at most `budget` chars, and whether it was cut.
+
+    Each code point's escape is independent, so the weight is the sum of
+    per-char weights plus the two quotes."""
+    remaining = budget - 2
+    for index, char in enumerate(value):
+        remaining -= len(compact_json(char)) - 2
+        if remaining < 0:
+            return value[:index], True
+    return value, False

@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.article import ArticleFile, ArticleTextBlock
@@ -18,11 +18,18 @@ from app.repositories.article_text_block_repository import ArticleTextBlockRepos
 from app.schemas.mcp_article_text import McpTextChunk, McpTextPage, chunk_locator_prefix
 from app.schemas.mcp_articles import McpFileOutline, McpOutlineHeading
 from app.utils.opaque_cursor import cursor_position, decode_cursor, encode_cursor
+from app.utils.text_caps import cap_json_weight
 
 # Module constants (spec §5.1 size caps): an outline keeps at most this many
 # headings, each capped in length.
 _HEADING_CAP = 60
-_HEADING_TEXT_CAP = 120
+_HEADING_TEXT_WEIGHT = 122  # 120 plain chars + quotes; escaped text is cut shorter
+
+# A heading of at most this many characters made only of digits, punctuation
+# and spaces ("1 3", "2.1") is a parser artefact: the outline drops it in SQL,
+# before the cap, so junk never crowds out or truncates real headings.
+_JUNK_HEADING_MAX_CHARS = 8
+_JUNK_HEADING_RE = r"^[[:digit:][:punct:][:space:]]*$"
 
 # Rows fetched per repository round-trip while paging article text.
 _TEXT_WINDOW_SIZE = 200
@@ -172,6 +179,17 @@ async def list_text_blocks(db: AsyncSession, article_file_id: UUID) -> list[dict
     ]
 
 
+async def last_page_number(db: AsyncSession, article_file_id: UUID) -> int | None:
+    """The highest page number holding a text block of the file, or None."""
+    return (
+        await db.execute(
+            select(func.max(ArticleTextBlock.page_number)).where(
+                ArticleTextBlock.article_file_id == article_file_id
+            )
+        )
+    ).scalar_one()
+
+
 async def get_file_outline(db: AsyncSession, *, article_file_id: UUID) -> McpFileOutline:
     """An article file's page/block counts plus its heading outline
     (spec §5.1): one aggregate query, one capped headings query."""
@@ -194,6 +212,13 @@ async def get_file_outline(db: AsyncSession, *, article_file_id: UUID) -> McpFil
             .where(
                 ArticleTextBlock.article_file_id == article_file_id,
                 ArticleTextBlock.block_type == "heading",
+                not_(
+                    and_(
+                        func.char_length(func.btrim(ArticleTextBlock.text))
+                        <= _JUNK_HEADING_MAX_CHARS,
+                        ArticleTextBlock.text.regexp_match(_JUNK_HEADING_RE),
+                    )
+                ),
             )
             .order_by(ArticleTextBlock.page_number, ArticleTextBlock.block_index)
             .limit(_HEADING_CAP + 1)
@@ -206,7 +231,11 @@ async def get_file_outline(db: AsyncSession, *, article_file_id: UUID) -> McpFil
         page_count=page_count,
         block_count=block_count,
         headings=[
-            McpOutlineHeading(page=page, block_index=block_index, text=text[:_HEADING_TEXT_CAP])
+            McpOutlineHeading(
+                page=page,
+                block_index=block_index,
+                text=cap_json_weight(text, _HEADING_TEXT_WEIGHT)[0],
+            )
             for page, block_index, text in heading_rows[:_HEADING_CAP]
         ],
         headings_truncated=headings_truncated,
