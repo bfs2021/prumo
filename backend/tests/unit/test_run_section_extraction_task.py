@@ -68,9 +68,29 @@ class _FakeSession:
         self.close = AsyncMock()
 
 
-def _session_factory(session: _FakeSession) -> Any:
+#: The per-task engine ``worker_engine`` yields; the task session and the
+#: ledger sink's session factory are both built on it.
+_TASK_ENGINE = MagicMock(name="task_engine")
+
+
+@pytest.fixture(autouse=True)
+def task_engine(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Patch ``worker_engine`` — no real engine is built. Returns the engines
+    each ``worker_session`` call received, in call order."""
+
     @asynccontextmanager
-    async def _factory() -> AsyncIterator[_FakeSession]:
+    async def _engine() -> AsyncIterator[Any]:
+        yield _TASK_ENGINE
+
+    monkeypatch.setattr("app.worker._session.worker_engine", _engine)
+    return []
+
+
+def _session_factory(session: _FakeSession, seen: list[Any] | None = None) -> Any:
+    @asynccontextmanager
+    async def _factory(engine: Any = None) -> AsyncIterator[_FakeSession]:
+        if seen is not None:
+            seen.append(engine)
         yield session
 
     return _factory
@@ -98,7 +118,7 @@ def _batch_result(run_id: str) -> BatchExtractionResult:
                 "entity_type_name": "Outcome",
                 "success": True,
                 "suggestions_created": 4,
-                "tokens_used": 200,
+                "tokens": {"prompt": 150, "completion": 50, "total": 200},
                 "skipped": False,
                 "error": None,
             },
@@ -106,8 +126,6 @@ def _batch_result(run_id: str) -> BatchExtractionResult:
                 "entity_type_id": "etype-bbb",
                 "entity_type_name": "Population",
                 "success": False,
-                "suggestions_created": 0,
-                "tokens_used": 0,
                 "skipped": False,
                 "error": "timeout",
             },
@@ -290,9 +308,55 @@ class TestRunSectionExtractionTaskBatch:
         assert result["sections"][0]["entity_type_id"] == "etype-aaa"
         assert result["sections"][0]["success"] is True
         assert result["sections"][0]["suggestions_created"] == 4
+        # The job result keeps the API's per-section ``tokens_used`` total.
+        assert result["sections"][0]["tokens_used"] == 200
+        assert "tokens" not in result["sections"][0]
+        assert "tokens_used" not in result["sections"][1]
         assert result["sections"][1]["entity_type_id"] == "etype-bbb"
         assert result["sections"][1]["success"] is False
         assert result["sections"][1]["error"] == "timeout"
+
+
+class TestRunSectionExtractionTaskMetering:
+    def test_worker_injects_a_ledger_sink(self, task_engine: list[Any]):
+        """The composition root builds the ledger sink on the task's own
+        engine — the one its session runs on — through
+        ``create_ledger_session_factory``."""
+        from app.services.ai_usage_metering import LedgerSink
+
+        run_id, entity_type_id = str(uuid4()), str(uuid4())
+        session = _FakeSession()
+        fake_service = MagicMock()
+        fake_service.run_from_request = AsyncMock(
+            return_value=_single_result(run_id, entity_type_id)
+        )
+        with (
+            patch("app.services.ai_extraction.AiExtraction", return_value=fake_service) as domain,
+            patch(
+                "app.services.engine_credentials.resolve_provider_key", AsyncMock(return_value=None)
+            ),
+            patch("app.core.factories.create_storage_adapter", return_value=MagicMock()),
+            patch("app.core.deps.get_supabase_client", return_value=MagicMock()),
+            patch(
+                "app.worker._session.worker_session",
+                new=_session_factory(session, task_engine),
+            ),
+        ):
+            _apply(
+                {
+                    "projectId": str(uuid4()),
+                    "articleId": str(uuid4()),
+                    "templateId": str(uuid4()),
+                    "entityTypeId": entity_type_id,
+                },
+                str(uuid4()),
+            )
+
+        sink = domain.call_args.kwargs["usage_sink"]
+        assert isinstance(sink, LedgerSink)
+        assert task_engine == [_TASK_ENGINE]
+        assert sink.session_factory.kw["bind"] is _TASK_ENGINE
+        assert sink.session_factory.kw["expire_on_commit"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +678,7 @@ def test_durable_delivery_uses_recorded_owner_payload_and_separate_session():
     sessions = []
 
     @asynccontextmanager
-    async def session_factory():
+    async def session_factory(_engine: Any = None):
         session = _FakeSession()
         session.get.return_value = SimpleNamespace(
             id=attempt_id,

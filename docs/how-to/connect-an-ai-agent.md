@@ -133,7 +133,18 @@ Read tools:
 - `get_article_text` — an article's extracted text, paged.
 - `get_article_pdf` — a time-limited signed link to an article's PDF.
 - `search_project_text` — full-text search across a project's articles.
-- `get_extractions` — extracted values for an article.
+- `get_extractions` — extracted values for an article. In the `detailed`
+  format each row's `evidence[]` items are `{quote, quote_truncated,
+  locator, grounded, stale}`: `locator` is the `p{page}·b{block}`
+  reference of the first block the quote was anchored to (the same form
+  `get_article_text` prints), or null when the quote could not be grounded
+  in the parsed text; `stale` means the article was re-parsed after
+  anchoring, so the location may have moved. An AI-decided row also
+  carries `provenance = {model, mode, template_version, schema_sha256,
+  text_sha256, content_version, prompt_version}` (hashes cut to 12
+  characters) naming the generation behind it; human, consensus and older
+  AI rows carry `null`. `model` is listed in `untrusted_fields`: a custom
+  host's model id is text its owner typed.
 - `get_template` — a project's questionnaire, in three views:
   `published` (default; what reviewers and the AI use), `draft` (managers
   only; the unpublished questionnaire with its `fingerprint` and `lint`)

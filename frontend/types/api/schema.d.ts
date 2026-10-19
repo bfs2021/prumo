@@ -414,7 +414,7 @@ export interface paths {
         head?: never;
         /**
          * Rename or re-key one extraction instance
-         * @description Rewrites the entry's label and/or its identity key; a re-key appends {who, when, from, to} to the instance's entity_key_history.
+         * @description Rewrites the entry's label and/or its identity key; a re-key appends {who, when, from, to} to the instance's entity_key_history. A re-key onto an identity a sibling already holds answers a typed 409 ENTRY_KEY_DUPLICATE and changes nothing.
          */
         patch: operations["update_instance_api_v1_extraction_instances__instance_id__patch"];
         trace?: never;
@@ -4037,6 +4037,12 @@ export interface components {
              * @description block_index values for deterministic reader highlight
              */
             blockIds?: number[];
+            /**
+             * Grounded
+             * @description the position resolves to a parsed-text anchor
+             * @default false
+             */
+            grounded: boolean;
             /** Page Number */
             page_number: number | null;
             /** Proposal Record Id */
@@ -4046,6 +4052,12 @@ export interface components {
              * @default 0
              */
             rank: number;
+            /**
+             * Stale
+             * @description grounded, and the article was re-parsed since this anchor was made: the location may have moved
+             * @default false
+             */
+            stale: boolean;
             /** Text Content */
             text_content: string | null;
         };
@@ -8384,6 +8396,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ApiResponse_RunViewInstance_"];
                 };
+            };
+            /** @description ENTRY_KEY_DUPLICATE: a sibling entry already holds the requested key. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
