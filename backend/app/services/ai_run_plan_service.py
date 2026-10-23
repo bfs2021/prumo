@@ -330,7 +330,9 @@ async def build_plan(
     will_run = [a for a in selected if a not in skipped]
 
     batches = ExtractionBatchRepository(db)
-    active = await batches.active_batch_id(owner_id, template.id)
+    active = await batches.active_batch_id(
+        owner_id, template.id, since=now - ExtractionBatchDispatcher.LIVE_WINDOW
+    )
     if active is not None:
         blockers.append(Blocker("AI_RUN_ACTIVE", batch_id=active))
     used = await batches.agent_articles_since(project_id, since=now - AGENT_CAP_WINDOW)
