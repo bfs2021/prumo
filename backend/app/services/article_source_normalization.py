@@ -175,6 +175,22 @@ def _pubmed_authors(article: ET.Element) -> list[str] | None:
     return authors or None
 
 
+# Fields a PubMed fetch may fill on an article another source created, only
+# where blank. ``authors`` is deliberately absent (spec-gate #16).
+PUBMED_FILL_FIELDS = (
+    "abstract",
+    "mesh_terms",
+    "pmid",
+    "pmcid",
+    "keywords",
+    "article_type",
+    "language",
+    "volume",
+    "issue",
+    "pages",
+)
+
+
 def normalize_pubmed_record(*, record: ET.Element) -> CanonicalArticlePayload:
     """Map one efetch ``<PubmedArticle>`` to the canonical article payload."""
     citation = record.find("MedlineCitation")

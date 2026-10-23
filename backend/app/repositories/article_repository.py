@@ -4,17 +4,41 @@ Article Repository.
 Article and file persistence layer.
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import ColumnElement, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import InstrumentedAttribute, selectinload
 
 from app.models.article import Article, ArticleFile
 from app.models.article_author import ArticleSyncEvent, ArticleSyncRun
 from app.repositories.base import BaseRepository
+
+
+def doi_match_key(
+    column: ColumnElement[str | None] | InstrumentedAttribute[str | None],
+) -> ColumnElement[str]:
+    """Lower-cased, trimmed DOI with any ``doi.org`` URL or ``doi:`` prefix removed.
+
+    The right-hand side of the comparison is ``normalize_doi`` output; stored values
+    from other sources may still carry a prefix or stray case/whitespace.
+    """
+    return func.regexp_replace(
+        func.lower(func.btrim(column)), r"^(https?://(dx\.)?doi\.org/|doi:\s*)", ""
+    )
+
+
+def _is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, list):
+        return not value
+    return False
 
 
 class ArticleRepository(BaseRepository[Article]):
@@ -93,28 +117,44 @@ class ArticleRepository(BaseRepository[Article]):
         project_id: UUID,
         *,
         zotero_item_key: str | None = None,
+        pmid: str | None = None,
         doi: str | None = None,
         url_landing: str | None = None,
     ) -> Article | None:
+        """Oldest article in the project matching the key; PMID, then DOI, then URL."""
         if zotero_item_key:
             return await self.get_by_zotero_item_key(project_id, zotero_item_key)
 
-        clauses = []
-        if doi:
-            clauses.append(Article.doi == doi)
-        if url_landing:
-            clauses.append(Article.url_landing == url_landing)
-        if not clauses:
-            return None
-
-        result = await self.db.execute(
-            select(Article)
-            .where(Article.project_id == project_id)
-            .where(clauses[0] if len(clauses) == 1 else clauses[0] | clauses[1])
-            .order_by(Article.updated_at.desc())
-            .limit(1)
+        predicates = (
+            (pmid, Article.pmid == pmid),
+            (doi, doi_match_key(Article.doi) == doi),
+            (url_landing, Article.url_landing == url_landing),
         )
-        return result.scalar_one_or_none()
+        for value, predicate in predicates:
+            if not value:
+                continue
+            result = await self.db.execute(
+                select(Article)
+                .where(Article.project_id == project_id)
+                .where(predicate)
+                .order_by(Article.created_at.asc(), Article.id.asc())
+                .limit(1)
+            )
+            found = result.scalar_one_or_none()
+            if found is not None:
+                return found
+        return None
+
+    async def existing_pmids(self, project_id: UUID, pmids: Sequence[str]) -> set[str]:
+        """The subset of ``pmids`` already stored on an article of the project."""
+        if not pmids:
+            return set()
+        result = await self.db.execute(
+            select(Article.pmid)
+            .where(Article.project_id == project_id)
+            .where(Article.pmid.in_(pmids))
+        )
+        return {pmid for pmid in result.scalars().all() if pmid is not None}
 
     async def upsert_by_canonical_identity(
         self,
@@ -135,6 +175,42 @@ class ArticleRepository(BaseRepository[Article]):
             existing.last_synced_at = datetime.now(UTC)
             await self.db.flush()
             await self.db.refresh(existing)
+            return existing, False
+
+        article = Article(
+            project_id=project_id,
+            last_synced_at=datetime.now(UTC),
+            **payload,
+        )
+        created = await self.create(article)
+        return created, True
+
+    async def fill_only_upsert(
+        self,
+        *,
+        project_id: UUID,
+        payload: dict[str, Any],
+        canonical_identity: dict[str, str | None],
+        fill_fields: Sequence[str],
+    ) -> tuple[Article, bool]:
+        """Insert, or fill only the blank ``fill_fields`` of the matched article.
+
+        A match keeps every other column (title, provenance, Zotero keys,
+        ``last_synced_at``) exactly as the first source wrote it.
+        """
+        existing = await self.get_by_canonical_identity(
+            project_id,
+            pmid=canonical_identity.get("pmid"),
+            doi=canonical_identity.get("doi"),
+            url_landing=canonical_identity.get("url_landing"),
+        )
+        if existing:
+            for field in fill_fields:
+                incoming = payload.get(field)
+                if _is_blank(incoming) or not _is_blank(getattr(existing, field)):
+                    continue
+                setattr(existing, field, incoming)
+            await self.db.flush()
             return existing, False
 
         article = Article(
