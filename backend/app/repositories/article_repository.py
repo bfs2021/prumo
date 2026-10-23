@@ -282,6 +282,29 @@ class ArticleSyncRunRepository(BaseRepository[ArticleSyncRun]):
         )
         return result.scalar_one_or_none()
 
+    async def run_in_project(
+        self,
+        sync_run_id: UUID,
+        *,
+        project_id: UUID,
+        requested_by: UUID | None = None,
+        for_update: bool = False,
+    ) -> ArticleSyncRun | None:
+        """The run, only when it belongs to ``project_id``; the one run-in-project guard.
+
+        Missing and foreign runs both answer ``None``. ``requested_by``
+        narrows it to the requester's own runs; ``for_update`` row-locks it
+        and refreshes any stale identity-map copy.
+        """
+        query = select(ArticleSyncRun).where(
+            ArticleSyncRun.id == sync_run_id, ArticleSyncRun.project_id == project_id
+        )
+        if requested_by is not None:
+            query = query.where(ArticleSyncRun.requested_by_user_id == requested_by)
+        if for_update:
+            query = query.with_for_update().execution_options(populate_existing=True)
+        return (await self.db.execute(query)).scalar_one_or_none()
+
     async def update_counts(
         self, run: ArticleSyncRun, counts: dict[str, int], status: str
     ) -> ArticleSyncRun:
@@ -330,6 +353,28 @@ class ArticleSyncEventRepository(BaseRepository[ArticleSyncEvent]):
             processed_at=datetime.now(UTC),
         )
         return await self.create(event)
+
+    async def pmids_with_events(self, sync_run_id: UUID, pmids: Sequence[str]) -> set[str]:
+        """The subset of ``pmids`` that already has an event in the run."""
+        if not pmids:
+            return set()
+        pmid = ArticleSyncEvent.event_payload["pmid"].astext
+        result = await self.db.execute(
+            select(pmid)
+            .where(ArticleSyncEvent.sync_run_id == sync_run_id)
+            .where(pmid.in_(list(pmids)))
+            .distinct()
+        )
+        return set(result.scalars().all())
+
+    async def status_counts(self, sync_run_id: UUID) -> dict[str, int]:
+        """Event count per status in the run."""
+        result = await self.db.execute(
+            select(ArticleSyncEvent.status, func.count())
+            .where(ArticleSyncEvent.sync_run_id == sync_run_id)
+            .group_by(ArticleSyncEvent.status)
+        )
+        return {status: int(count) for status, count in result.all()}
 
     async def list_run_events(
         self,
