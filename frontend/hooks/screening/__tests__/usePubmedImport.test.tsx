@@ -2,7 +2,7 @@ import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
 import {renderHook, waitFor} from '@testing-library/react';
 import {http, HttpResponse} from 'msw';
 import type {ReactNode} from 'react';
-import {describe, expect, it, vi} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 
 vi.mock('@/integrations/supabase/client', () => ({
   supabase: {auth: {getSession: async () => ({data: {session: {access_token: 'test-token'}}})}},
@@ -56,6 +56,10 @@ function setup() {
 }
 
 describe('useImportRun', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('refreshes the whole screening family once when the run completes', async () => {
     serveRuns(['running', 'completed']);
     const {client, invalidate, wrapper} = setup();
@@ -76,6 +80,28 @@ describe('useImportRun', () => {
     const {client, wrapper} = setup();
     renderHook(() => useImportRun('p1', 's1'), {wrapper});
     await waitFor(() => expect(client.getQueryState(screeningKeys.config('p1'))?.isInvalidated).toBe(true));
+  });
+
+  it('stops polling a run that errors after it was running', async () => {
+    vi.useFakeTimers({shouldAdvanceTime: true});
+    let reads = 0;
+    server.use(
+      http.get(RUN_URL, () => {
+        reads += 1;
+        if (reads === 1) return HttpResponse.json(runBody('running'));
+        return HttpResponse.json({ok: false, error: {code: 'NOT_FOUND', message: 'gone'}}, {status: 404});
+      }),
+    );
+    const {wrapper} = setup();
+    renderHook(() => useImportRun('p1', 's1'), {wrapper});
+
+    await vi.waitFor(() => expect(reads).toBe(1));
+    // First poll: the run is gone (404). The query keeps its last `running` data.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(reads).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(reads).toBe(2);
   });
 
   it('does not fetch without a run id', async () => {

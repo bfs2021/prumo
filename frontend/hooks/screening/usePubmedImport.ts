@@ -54,8 +54,9 @@ export function useImportRun(projectId: string, syncRunId: string | null) {
     refetchOnMount: 'always',
     // A run that is gone will not come back: do not retry its 404.
     retry: (failures, error) => !(error instanceof ApiError && error.status === 404) && failures < 1,
-    // Poll only while the run is in flight.
-    refetchInterval: (q) => (isActive(q.state.data?.status) ? IMPORT_RUN_POLL_MS : false),
+    // Poll only while the run is in flight. After an error TanStack keeps the
+    // last `running` data, so the error itself must stop the poll (a 404 never recovers).
+    refetchInterval: (q) => (!q.state.error && isActive(q.state.data?.status) ? IMPORT_RUN_POLL_MS : false),
     queryFn: async (): Promise<ImportRunRead> => {
       const result = await fetchImportRun(projectId, syncRunId ?? '');
       if (!result.ok) throw result.error;

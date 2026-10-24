@@ -21,6 +21,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from app.api.v1.endpoints import pubmed_import
 from app.core.config import settings
@@ -219,9 +220,15 @@ async def test_ncbi_failure_fails_its_batch_and_continues(db_session: AsyncSessi
 
     run_id = await _new_run(db_session)
 
-    status = await _import(db_session, run_id, FOUND, fixture_client(handler), batch_size=2)
+    with capture_logs() as logs:
+        status = await _import(db_session, run_id, FOUND, fixture_client(handler), batch_size=2)
 
     assert status == "completed"
+    [failure] = [log for log in logs if log["event"] == "pubmed_efetch_failed"]
+    assert failure["log_level"] == "warning"
+    assert failure["sync_run_id"] == str(run_id)
+    assert failure["pmids"] == ["42908551", "42875467"]
+    assert failure["exc_info"] is True
     by_pmid = {e.event_payload["pmid"]: e for e in await _events(db_session, run_id)}
     for pmid in ("42908551", "42875467"):
         assert (by_pmid[pmid].status, by_pmid[pmid].error_code) == ("failed", "NCBI_UNAVAILABLE")
@@ -243,8 +250,14 @@ async def test_parse_error_fails_one_pmid_and_the_batch_continues(
     monkeypatch.setattr(pubmed_import_service, "normalize_pubmed_record", flaky)
     run_id = await _new_run(db_session)
 
-    assert await _import(db_session, run_id, FOUND) == "completed"
+    with capture_logs() as logs:
+        assert await _import(db_session, run_id, FOUND) == "completed"
 
+    [failure] = [log for log in logs if log["event"] == "pubmed_parse_failed"]
+    assert failure["log_level"] == "warning"
+    assert failure["sync_run_id"] == str(run_id)
+    assert failure["pmid"] == "42875467"
+    assert failure["exc_info"] is True
     by_pmid = {e.event_payload["pmid"]: e for e in await _events(db_session, run_id)}
     assert (by_pmid["42875467"].status, by_pmid["42875467"].error_code) == (
         "failed",

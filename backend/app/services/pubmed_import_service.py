@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.error_handler import AppError
+from app.core.logging import get_logger
 from app.models.article_author import ArticleSyncRun
 from app.repositories.article_repository import (
     ArticleRepository,
@@ -39,6 +40,8 @@ from app.services.pubmed_client import EFETCH_BATCH_SIZE, PubMedClient, PubMedFe
 from app.worker import queue_health
 
 #: Right half of the per-project advisory key that serializes PubMed writes.
+logger = get_logger(__name__)
+
 PUBMED_IMPORT_LOCK = UUID("e2d0f3dc-4692-406e-bcaa-5df90c43fcf6")
 LIVE_RUN_STATUSES = ("pending", "running")
 
@@ -174,6 +177,12 @@ class PubmedImportService:
             try:
                 records = await client.efetch(batch)
             except PubMedFetchError:
+                logger.warning(
+                    "pubmed_efetch_failed",
+                    sync_run_id=str(sync_run_id),
+                    pmids=batch,
+                    exc_info=True,
+                )
                 records = None
 
             await take_advisory_xact_lock(self.db, project_id, PUBMED_IMPORT_LOCK)
@@ -225,6 +234,12 @@ class PubmedImportService:
             try:
                 canonical = normalize_pubmed_record(record=record)
             except Exception:
+                logger.warning(
+                    "pubmed_parse_failed",
+                    sync_run_id=str(sync_run_id),
+                    pmid=pmid,
+                    exc_info=True,
+                )
                 event_status, error_code = "failed", "PARSE_ERROR"
             else:
                 article, created = await self._articles.fill_only_upsert(
