@@ -1,21 +1,30 @@
-"""Screening persistence: assignments and the decisions that freeze the config.
+"""Screening persistence: assignments, decisions and rulings.
 
-Every read takes ``project_id`` as a required keyword, and every
-assignment-to-article join goes through :data:`ARTICLE_STILL_IN_PROJECT`.
+Every read takes ``project_id`` as a required keyword (an id list only narrows
+it), and every assignment-to-article join goes through
+:data:`ARTICLE_STILL_IN_PROJECT`. The two id-keyed calls, ``get_assignment``
+and ``lock_assignment``, belong to the by-id guard and run behind it.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any, TypeVar
 from uuid import UUID
 
-from sqlalchemy import Select, and_, exists, func, literal, select
+from sqlalchemy import Select, Text, and_, cast, exists, func, literal, select
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import QueryableAttribute
 
 from app.models.article import Article
-from app.models.screening import SCREENING_PHASE, ScreeningAssignment, ScreeningDecision
+from app.models.screening import (
+    SCREENING_PHASE,
+    ScreeningArbitration,
+    ScreeningAssignment,
+    ScreeningDecision,
+)
 
 # THE assignment-to-article join condition. Members can move an article to
 # another project through PostgREST and nothing binds an assignment's
@@ -37,6 +46,19 @@ def live_assignments(project_id: UUID) -> Select[tuple[ScreeningAssignment]]:
             ScreeningAssignment.phase == SCREENING_PHASE,
         )
     )
+
+
+# Queue order: oldest enrollment first, then a stable shuffle within it, so two
+# reviewers do not walk one enrollment in the same order.
+_QUEUE_ORDER = (ScreeningAssignment.enrolled_at, func.md5(cast(ScreeningAssignment.id, Text)))
+
+
+_S = TypeVar("_S", bound=Select[Any])
+
+
+def _narrowed(stmt: _S, column: QueryableAttribute[UUID], ids: Sequence[UUID] | None) -> _S:
+    """Narrow a project-scoped read to ``ids``; ``None`` keeps the whole project."""
+    return stmt if ids is None else stmt.where(column.in_(ids))
 
 
 class ScreeningRepository:
@@ -88,3 +110,138 @@ class ScreeningRepository:
             .where(ScreeningAssignment.project_id == project_id)
         )
         return bool((await self.db.execute(stmt)).scalar_one())
+
+    async def get_assignment(self, assignment_id: UUID) -> ScreeningAssignment | None:
+        """The by-id guard's lookup; nothing else resolves an assignment by id alone."""
+        stmt = select(ScreeningAssignment).where(ScreeningAssignment.id == assignment_id)
+        return (await self.db.execute(stmt)).scalar_one_or_none()
+
+    async def lock_assignment(self, assignment_id: UUID) -> None:
+        """``FOR NO KEY UPDATE`` on a guard-bound assignment: serializes its decisions
+        without blocking the KEY SHARE a decision's FK insert takes."""
+        stmt = (
+            select(ScreeningAssignment.id)
+            .where(ScreeningAssignment.id == assignment_id)
+            .with_for_update(key_share=True)
+        )
+        await self.db.execute(stmt)
+
+    async def live_assignment_ids(
+        self, *, project_id: UUID, assignment_ids: Sequence[UUID] | None = None
+    ) -> list[UUID]:
+        stmt = live_assignments(project_id).with_only_columns(ScreeningAssignment.id)
+        stmt = _narrowed(stmt, ScreeningAssignment.id, assignment_ids)
+        return list((await self.db.execute(stmt)).scalars().all())
+
+    async def current_decisions(
+        self, *, project_id: UUID, assignment_ids: Sequence[UUID] | None = None
+    ) -> list[ScreeningDecision]:
+        """Each reviewer's latest decision per assignment of the project."""
+        stmt = (
+            select(ScreeningDecision)
+            .join(ScreeningAssignment, ScreeningAssignment.id == ScreeningDecision.assignment_id)
+            .where(ScreeningAssignment.project_id == project_id)
+            .distinct(ScreeningDecision.assignment_id, ScreeningDecision.reviewer_id)
+            .order_by(
+                ScreeningDecision.assignment_id,
+                ScreeningDecision.reviewer_id,
+                ScreeningDecision.created_at.desc(),
+                ScreeningDecision.id.desc(),
+            )
+        )
+        stmt = _narrowed(stmt, ScreeningDecision.assignment_id, assignment_ids)
+        return list((await self.db.execute(stmt)).scalars().all())
+
+    async def latest_rulings(
+        self, *, project_id: UUID, assignment_ids: Sequence[UUID] | None = None
+    ) -> dict[UUID, ScreeningArbitration]:
+        """The latest ruling per assignment of the project."""
+        stmt = (
+            select(ScreeningArbitration)
+            .join(ScreeningAssignment, ScreeningAssignment.id == ScreeningArbitration.assignment_id)
+            .where(ScreeningAssignment.project_id == project_id)
+            .distinct(ScreeningArbitration.assignment_id)
+            .order_by(
+                ScreeningArbitration.assignment_id,
+                ScreeningArbitration.created_at.desc(),
+                ScreeningArbitration.id.desc(),
+            )
+        )
+        stmt = _narrowed(stmt, ScreeningArbitration.assignment_id, assignment_ids)
+        rows = (await self.db.execute(stmt)).scalars().all()
+        return {row.assignment_id: row for row in rows}
+
+    async def assignments_with_articles(
+        self, *, project_id: UUID, assignment_ids: Sequence[UUID]
+    ) -> list[tuple[UUID, Article]]:
+        """The given live assignments with their articles, in queue order."""
+        stmt = (
+            live_assignments(project_id)
+            .with_only_columns(ScreeningAssignment.id, Article)
+            .where(ScreeningAssignment.id.in_(assignment_ids))
+            .order_by(*_QUEUE_ORDER)
+        )
+        return [(row[0], row[1]) for row in (await self.db.execute(stmt)).all()]
+
+    def _awaiting(
+        self, *, project_id: UUID, reviewer_id: UUID, reviewer_count: int
+    ) -> Select[tuple[ScreeningAssignment]]:
+        """THE "awaiting this reviewer" query: no ruling, no decision of theirs, a free seat."""
+        reviewers = (
+            select(func.count(func.distinct(ScreeningDecision.reviewer_id)))
+            .where(ScreeningDecision.assignment_id == ScreeningAssignment.id)
+            .scalar_subquery()
+        )
+        return live_assignments(project_id).where(
+            ~exists().where(ScreeningArbitration.assignment_id == ScreeningAssignment.id),
+            ~exists().where(
+                ScreeningDecision.assignment_id == ScreeningAssignment.id,
+                ScreeningDecision.reviewer_id == reviewer_id,
+            ),
+            reviewers < reviewer_count,
+        )
+
+    async def queue_page(
+        self, *, project_id: UUID, reviewer_id: UUID, reviewer_count: int, limit: int = 20
+    ) -> list[tuple[UUID, Article]]:
+        stmt = (
+            self._awaiting(
+                project_id=project_id, reviewer_id=reviewer_id, reviewer_count=reviewer_count
+            )
+            .with_only_columns(ScreeningAssignment.id, Article)
+            .order_by(*_QUEUE_ORDER)
+            .limit(limit)
+        )
+        return [(row[0], row[1]) for row in (await self.db.execute(stmt)).all()]
+
+    async def count_awaiting_me(
+        self, *, project_id: UUID, reviewer_id: UUID, reviewer_count: int
+    ) -> int:
+        awaiting = (
+            self._awaiting(
+                project_id=project_id, reviewer_id=reviewer_id, reviewer_count=reviewer_count
+            )
+            .with_only_columns(ScreeningAssignment.id)
+            .subquery()
+        )
+        return int((await self.db.execute(select(func.count()).select_from(awaiting))).scalar_one())
+
+    async def add_decision(
+        self,
+        assignment_id: UUID,
+        reviewer_id: UUID,
+        decision: str,
+        exclusion_reason: str | None,
+        rationale: str | None,
+    ) -> ScreeningDecision:
+        """One INSERT: a decision row is never updated, a change is a new row."""
+        row = ScreeningDecision(
+            assignment_id=assignment_id,
+            reviewer_id=reviewer_id,
+            decision=decision,
+            exclusion_reason=exclusion_reason,
+            rationale=rationale,
+        )
+        self.db.add(row)
+        await self.db.flush()
+        return row

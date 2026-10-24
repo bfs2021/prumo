@@ -17,7 +17,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.article import Article
-from app.models.screening import SCREENING_PHASE, ScreeningAssignment, ScreeningDecision
+from app.models.screening import (
+    SCREENING_PHASE,
+    ScreeningArbitration,
+    ScreeningAssignment,
+    ScreeningDecision,
+)
 from app.repositories.project_repository import ProjectRepository
 
 
@@ -105,6 +110,38 @@ async def add_decision(
     db.add(row)
     await db.flush()
     return row.id
+
+
+async def add_ruling(
+    db: AsyncSession,
+    assignment_id: UUID,
+    decided_by: UUID,
+    decision: str,
+    *,
+    reason: str | None = None,
+    selected: UUID | None = None,
+    created_at: datetime | None = None,
+) -> UUID:
+    """One arbitration row, for setup; ``None`` keeps the SQL default ``now()``."""
+    row = ScreeningArbitration(
+        assignment_id=assignment_id,
+        decided_by=decided_by,
+        decision=decision,
+        exclusion_reason=reason,
+        selected_decision_id=selected,
+        **({} if created_at is None else {"created_at": created_at}),
+    )
+    db.add(row)
+    await db.flush()
+    return row.id
+
+
+async def move_article(db: AsyncSession, article_id: UUID, to_project: UUID) -> None:
+    """What a member's PostgREST update does: the article changes project, its assignment stays."""
+    await db.execute(
+        text("UPDATE public.articles SET project_id = :to WHERE id = :aid"),
+        {"to": str(to_project), "aid": str(article_id)},
+    )
 
 
 async def set_reviewer_count(db: AsyncSession, project_id: UUID, n: int) -> None:

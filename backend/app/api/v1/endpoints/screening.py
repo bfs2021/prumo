@@ -1,4 +1,4 @@
-"""Title/abstract screening: project config and enrollment."""
+"""Title/abstract screening: project config, enrollment, the blind queue and decisions."""
 
 from __future__ import annotations
 
@@ -6,20 +6,32 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.api.deps.security import require_project_manager, require_project_scope
+from app.api.deps.scope import load_assignment_for_member
+from app.api.deps.security import (
+    ensure_project_reviewer,
+    get_current_user_sub,
+    require_project_manager,
+    require_project_scope,
+)
 from app.core.deps import DbSession
 from app.schemas.common import ApiResponse
 from app.schemas.screening import (
+    ScreeningAssignmentRead,
     ScreeningConfigRead,
     ScreeningConfigUpdate,
+    ScreeningDecisionCreate,
     ScreeningEnrollRequest,
     ScreeningEnrollResult,
+    ScreeningQueueRead,
 )
 from app.services.article_read_service import ArticleNotFoundError
 from app.services.screening_config_service import ProjectNotFoundError, ScreeningConfigService
+from app.services.screening_review_service import AssignmentNotFoundError, ScreeningReviewService
 from app.utils.rate_limiter import limiter
 
 router = APIRouter()
+
+_ASSIGNMENT_NOT_FOUND = "Screening assignment not found"
 
 
 @router.get("/projects/{project_id}/screening/config")
@@ -83,3 +95,79 @@ async def enroll_screening(
         ) from exc
     await db.commit()
     return ApiResponse.success(result, trace_id=getattr(request.state, "trace_id", None))
+
+
+@router.get(
+    "/projects/{project_id}/screening/queue",
+    responses={
+        403: {"description": "Reviewer role required"},
+        409: {"description": "Screening is not set up for this project"},
+    },
+)
+@limiter.limit("120/minute")
+async def get_screening_queue(
+    request: Request,
+    project_id: UUID,
+    db: DbSession,
+    user_sub: UUID = Depends(get_current_user_sub),
+) -> ApiResponse[ScreeningQueueRead]:
+    await ensure_project_reviewer(db, project_id, user_sub)
+    queue = await ScreeningReviewService(db).queue(project_id, user_sub)
+    return ApiResponse.success(queue, trace_id=getattr(request.state, "trace_id", None))
+
+
+@router.get(
+    "/screening/assignments/{assignment_id}",
+    responses={
+        403: {"description": "Not a member of the assignment's project"},
+        404: {"description": "Assignment not found, or its article left the project"},
+    },
+)
+@limiter.limit("120/minute")
+async def get_screening_assignment(
+    request: Request,
+    assignment_id: UUID,
+    db: DbSession,
+    user_sub: UUID = Depends(get_current_user_sub),
+) -> ApiResponse[ScreeningAssignmentRead]:
+    await load_assignment_for_member(db, assignment_id, user_sub)
+    try:
+        assignment = await ScreeningReviewService(db).get_assignment(assignment_id, user_sub)
+    except AssignmentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=_ASSIGNMENT_NOT_FOUND
+        ) from exc
+    return ApiResponse.success(assignment, trace_id=getattr(request.state, "trace_id", None))
+
+
+@router.post(
+    "/screening/assignments/{assignment_id}/decisions",
+    responses={
+        403: {"description": "Reviewer role required in the assignment's project"},
+        404: {"description": "Assignment not found, or its article left the project"},
+        409: {
+            "description": (
+                "Screening not set up, the record has all its reviewers, "
+                "or the exclusion reason is not in the protocol"
+            )
+        },
+    },
+)
+@limiter.limit("120/minute")
+async def post_screening_decision(
+    request: Request,
+    assignment_id: UUID,
+    body: ScreeningDecisionCreate,
+    db: DbSession,
+    user_sub: UUID = Depends(get_current_user_sub),
+) -> ApiResponse[ScreeningAssignmentRead]:
+    ref = await load_assignment_for_member(db, assignment_id, user_sub)
+    await ensure_project_reviewer(db, ref.project_id, user_sub)
+    try:
+        assignment = await ScreeningReviewService(db).decide(assignment_id, user_sub, body)
+    except AssignmentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=_ASSIGNMENT_NOT_FOUND
+        ) from exc
+    await db.commit()
+    return ApiResponse.success(assignment, trace_id=getattr(request.state, "trace_id", None))

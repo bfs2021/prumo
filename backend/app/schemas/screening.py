@@ -1,8 +1,14 @@
-"""Title/abstract screening: project config and enrollment. snake_case on the wire."""
+"""Title/abstract screening: config, enrollment, queue and decisions. snake_case on the wire."""
 
+from datetime import datetime
+from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+ScreeningDecisionValue = Literal["include", "exclude", "maybe"]
+ScreeningOutcomeKind = Literal["solo", "consensus", "arbitrated"]
+ScreeningCallerStatus = Literal["awaiting_me", "awaiting_others", "conflict", "decided"]
 
 MAX_ENROLL_ARTICLES = 10_000
 
@@ -41,3 +47,93 @@ class ScreeningEnrollRequest(BaseModel):
 class ScreeningEnrollResult(BaseModel):
     enrolled: int
     already_enrolled: int
+
+
+class ScreeningArticle(BaseModel):
+    """The bibliographic record a reviewer screens."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+    abstract: str | None
+    authors: list[str] | None
+    journal_title: str | None
+    publication_year: int | None
+    pmid: str | None
+    doi: str | None
+
+
+class ScreeningQueueItem(BaseModel):
+    assignment_id: UUID
+    article: ScreeningArticle
+
+
+class ScreeningQueueRead(BaseModel):
+    """The caller's next records to screen, with the counts around them."""
+
+    items: list[ScreeningQueueItem]
+    awaiting_me: int
+    awaiting_others: int
+    exclusion_reasons: list[str]
+
+
+class ScreeningDecisionCreate(BaseModel):
+    """One reviewer decision; an exclusion reason only on ``exclude``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: ScreeningDecisionValue
+    exclusion_reason: str | None = Field(None, max_length=1000)
+    rationale: str | None = Field(None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _reason_only_on_exclude(self) -> Self:
+        if self.exclusion_reason is not None and self.decision != "exclude":
+            raise ValueError("exclusion_reason is only allowed when decision is 'exclude'")
+        return self
+
+
+class ScreeningDecisionRead(BaseModel):
+    id: UUID
+    decision: ScreeningDecisionValue
+    exclusion_reason: str | None
+    rationale: str | None
+    created_at: datetime
+
+
+class PeerDecisionRead(ScreeningDecisionRead):
+    """Another reviewer's current decision, shown only once the review is unblinded."""
+
+    reviewer_id: UUID
+    reviewer_name: str | None
+
+
+class ScreeningOutcomeRead(BaseModel):
+    kind: ScreeningOutcomeKind
+    decision: ScreeningDecisionValue
+    exclusion_reason: str | None
+    reasons_differ: bool
+
+
+class ScreeningAssignmentRead(BaseModel):
+    """One record as the caller may see it: peers stay hidden until there is an outcome."""
+
+    id: UUID
+    project_id: UUID
+    article: ScreeningArticle
+    status: ScreeningCallerStatus
+    my_decision: ScreeningDecisionRead | None
+    outcome: ScreeningOutcomeRead | None
+    peer_decisions: list[PeerDecisionRead]
+    exclusion_reasons: list[str]
+
+
+class ScreeningAssignmentRef(BaseModel):
+    """An assignment resolved by id: what the guard hands to the route."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    article_id: UUID
