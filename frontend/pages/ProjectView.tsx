@@ -249,7 +249,7 @@ export default function ProjectView() {
         return <ComingSoonPanel title={t('layout', 'navOverview')} icon={LayoutDashboard} />;
 
       case 'screening':
-        return <ScreeningTab projectId={projectId || ''} />;
+        return <ScreeningTab projectId={projectId || ''} onImportComplete={loadArticles} />;
 
       case 'prisma':
         return <ComingSoonPanel title={t('layout', 'navPrismaReport')} icon={FileBarChart} />;

@@ -192,6 +192,20 @@ describe('ScreeningTab', () => {
     expect(screen.queryByRole('button', {name: 'Enroll all articles'})).not.toBeInTheDocument();
   });
 
+  it('offers PubMed import to members', async () => {
+    serveConfig(config({can_manage: false, can_review: true, reviewer_count: 2}));
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(await screen.findByRole('button', {name: 'Import from PubMed'}));
+    expect(await screen.findByRole('dialog', {name: 'Import from PubMed'})).toBeInTheDocument();
+  });
+
+  it('offers PubMed import from the running header', async () => {
+    serveConfig(config({reviewer_count: 2, enrolled: 3, not_enrolled: 0}));
+    renderTab();
+    expect(await screen.findByRole('button', {name: 'Import from PubMed'})).toBeEnabled();
+  });
+
   it('shows the viewer notice once screening runs', async () => {
     serveConfig(
       config({can_manage: false, can_review: false, can_arbitrate: false, reviewer_count: 2, enrolled: 3}),

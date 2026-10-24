@@ -11,20 +11,29 @@ import type {ReactNode} from 'react';
 import {describe, expect, it, vi} from 'vitest';
 
 const fetchScreeningConfig = vi.fn();
+const fetchImportRun = vi.fn();
 vi.mock('@/services/screeningService', () => ({
   fetchScreeningConfig: (...args: unknown[]) => fetchScreeningConfig(...args),
+  fetchImportRun: (...args: unknown[]) => fetchImportRun(...args),
 }));
 
+import {useImportRun} from '@/hooks/screening/usePubmedImport';
 import {useScreeningConfig} from '@/hooks/screening/useScreeningConfig';
 
 // The app's default freshness window (frontend/App.tsx): a cached read inside
 // it is fresh, so only refetchOnMount can make a remount fetch again.
 const APP_STALE_TIME_MS = 5 * 60 * 1000;
-const DATA = {stub: true};
+// `running`, not `completed`: a finished run invalidates the whole screening
+// family, which refetches the run itself and would double the call count. The
+// 2 s poll interval cannot fire inside this test.
+const DATA = {stub: true, status: 'running'};
 
 type Row = [name: string, useHook: () => {data: unknown; isSuccess: boolean; isStale: boolean}, serviceFn: Mock];
 
-const ROWS: Row[] = [['useScreeningConfig', () => useScreeningConfig('p1'), fetchScreeningConfig]];
+const ROWS: Row[] = [
+  ['useScreeningConfig', () => useScreeningConfig('p1'), fetchScreeningConfig],
+  ['useImportRun', () => useImportRun('p1', 's1'), fetchImportRun],
+];
 
 function wrapper() {
   const client = new QueryClient({

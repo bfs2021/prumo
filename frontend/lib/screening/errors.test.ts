@@ -3,8 +3,14 @@ import {describe, expect, it} from 'vitest';
 import {ApiError} from '@/integrations/api/client';
 import {screeningErrorMessage} from '@/lib/screening/errors';
 
-// Every code the screening map translates; Tasks 10–12 append theirs.
-const MAPPED_CODES = ['SCREENING_CONFIG_FROZEN', 'SCREENING_TOO_FEW_REVIEWERS', 'VALIDATION_ERROR'];
+// Every code the screening map translates; Tasks 11–12 append theirs.
+const MAPPED_CODES = [
+  'SCREENING_CONFIG_FROZEN',
+  'SCREENING_TOO_FEW_REVIEWERS',
+  'VALIDATION_ERROR',
+  'NCBI_EMAIL_NOT_CONFIGURED',
+  'SERVICE_UNAVAILABLE',
+];
 
 describe('screeningErrorMessage', () => {
   it.each(MAPPED_CODES)('maps %s to copy without a placeholder', (code) => {

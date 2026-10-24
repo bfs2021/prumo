@@ -7,4 +7,6 @@ export const screeningKeys = {
   all: ['screening'] as const,
   project: (projectId: string) => [...screeningKeys.all, 'project', projectId] as const,
   config: (projectId: string) => [...screeningKeys.project(projectId), 'config'] as const,
+  importRun: (projectId: string, syncRunId: string) =>
+    [...screeningKeys.project(projectId), 'import-run', syncRunId] as const,
 } as const;

@@ -15,6 +15,8 @@ const CODE_TO_KEY: Record<string, ScreeningCopyKey> = {
   SCREENING_CONFIG_FROZEN: 'errorConfigFrozen',
   SCREENING_TOO_FEW_REVIEWERS: 'errorTooFewReviewers',
   VALIDATION_ERROR: 'errorValidation',
+  NCBI_EMAIL_NOT_CONFIGURED: 'errNcbiEmailMissing',
+  SERVICE_UNAVAILABLE: 'errQueueUnavailable',
 };
 
 export function screeningErrorMessage(error: unknown): string {

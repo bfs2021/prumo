@@ -2,9 +2,10 @@
  * The project's Screening tab. One config read drives a state machine,
  * checked in order: loading → load error → not configured → nothing enrolled
  * → running. Managers act in each state; members get a notice saying who
- * acts. Reviewer and arbitrator bodies of the running state land later.
+ * acts. Every member can import from PubMed where nothing is enrolled and in
+ * the running header. Reviewer and arbitrator bodies of the running state land later.
  */
-import {useId} from 'react';
+import {useId, type ReactNode} from 'react';
 
 import {ErrorState} from '@/components/patterns/ErrorState';
 import {Skeleton} from '@/components/ui/skeleton';
@@ -13,13 +14,16 @@ import {t} from '@/lib/copy';
 import {screeningErrorMessage} from '@/lib/screening/errors';
 
 import {ScreeningConfigForm} from './ScreeningConfigForm';
-import {EnrollAllButton, ScreeningHeader} from './ScreeningHeader';
+import {EnrollAllButton, PubMedImportButton, ScreeningHeader} from './ScreeningHeader';
 
-function Notice({title, body}: {title: string; body: string}) {
+function Notice({title, body, children}: {title: string; body: string; children?: ReactNode}) {
   return (
-    <div className="flex flex-col items-center gap-1 px-4 py-12 text-center">
-      <h2 className="text-sm font-medium text-foreground">{title}</h2>
-      <p className="max-w-sm text-[13px] text-muted-foreground">{body}</p>
+    <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-sm font-medium text-foreground">{title}</h2>
+        <p className="max-w-sm text-[13px] text-muted-foreground">{body}</p>
+      </div>
+      {children}
     </div>
   );
 }
@@ -38,7 +42,7 @@ function LoadingState() {
   );
 }
 
-export function ScreeningTab({projectId}: {projectId: string}) {
+export function ScreeningTab({projectId, onImportComplete}: {projectId: string; onImportComplete?: () => void}) {
   const query = useScreeningConfig(projectId);
 
   if (query.isPending) return <LoadingState />;
@@ -67,7 +71,9 @@ export function ScreeningTab({projectId}: {projectId: string}) {
   if (config.enrolled === 0) {
     if (!config.can_manage) {
       return (
-        <Notice title={t('screening', 'nothingEnrolledTitle')} body={t('screening', 'nothingEnrolledMember')} />
+        <Notice title={t('screening', 'nothingEnrolledTitle')} body={t('screening', 'nothingEnrolledMember')}>
+          <PubMedImportButton projectId={projectId} canManage={false} onImportComplete={onImportComplete} />
+        </Notice>
       );
     }
     const nothingToEnroll = config.not_enrolled === 0;
@@ -84,6 +90,7 @@ export function ScreeningTab({projectId}: {projectId: string}) {
           disabled={nothingToEnroll}
         />
         {nothingToEnroll && <p className="text-xs text-muted-foreground">{t('screening', 'nothingToEnroll')}</p>}
+        <PubMedImportButton projectId={projectId} canManage onImportComplete={onImportComplete} />
       </div>
     );
   }
@@ -91,7 +98,7 @@ export function ScreeningTab({projectId}: {projectId: string}) {
   const isViewer = !config.can_review && !config.can_arbitrate;
   return (
     <div className="flex flex-col">
-      <ScreeningHeader projectId={projectId} config={config} />
+      <ScreeningHeader projectId={projectId} config={config} onImportComplete={onImportComplete} />
       {isViewer && (
         <p className="px-4 py-12 text-center text-[13px] text-muted-foreground">{t('screening', 'viewerNotice')}</p>
       )}
