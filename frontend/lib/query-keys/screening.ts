@@ -12,5 +12,6 @@ export const screeningKeys = {
     [...screeningKeys.project(projectId), 'import-run', syncRunId] as const,
   queue: (projectId: string) => [...screeningKeys.project(projectId), 'queue'] as const,
   conflicts: (projectId: string) => [...screeningKeys.project(projectId), 'conflicts'] as const,
+  prisma: (projectId: string) => [...screeningKeys.project(projectId), 'prisma'] as const,
   assignment: (assignmentId: string) => [...screeningKeys.all, 'assignment', assignmentId] as const,
 } as const;

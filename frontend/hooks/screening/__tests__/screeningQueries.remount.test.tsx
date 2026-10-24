@@ -15,14 +15,17 @@ const fetchImportRun = vi.fn();
 const fetchScreeningQueue = vi.fn();
 const fetchAssignment = vi.fn();
 const fetchConflicts = vi.fn();
+const fetchPrismaCounts = vi.fn();
 vi.mock('@/services/screeningService', () => ({
   fetchScreeningConfig: (...args: unknown[]) => fetchScreeningConfig(...args),
   fetchImportRun: (...args: unknown[]) => fetchImportRun(...args),
   fetchScreeningQueue: (...args: unknown[]) => fetchScreeningQueue(...args),
   fetchAssignment: (...args: unknown[]) => fetchAssignment(...args),
   fetchConflicts: (...args: unknown[]) => fetchConflicts(...args),
+  fetchPrismaCounts: (...args: unknown[]) => fetchPrismaCounts(...args),
 }));
 
+import {usePrismaCounts} from '@/hooks/screening/usePrismaCounts';
 import {useImportRun} from '@/hooks/screening/usePubmedImport';
 import {useScreeningAssignment} from '@/hooks/screening/useScreeningAssignment';
 import {useScreeningConflicts} from '@/hooks/screening/useScreeningConflicts';
@@ -45,6 +48,7 @@ const ROWS: Row[] = [
   ['useScreeningQueue', () => useScreeningQueue('p1', true), fetchScreeningQueue],
   ['useScreeningAssignment', () => useScreeningAssignment('a1'), fetchAssignment],
   ['useScreeningConflicts', () => useScreeningConflicts('p1', true), fetchConflicts],
+  ['usePrismaCounts', () => usePrismaCounts('p1'), fetchPrismaCounts],
 ];
 
 function wrapper() {

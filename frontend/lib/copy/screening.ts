@@ -104,6 +104,26 @@ export const screening = {
   rulingNote: 'Note for the record (optional)',
   rulingSaved: 'Conflict resolved',
 
+  // PRISMA counts (numbers only; the flow diagram comes later)
+  prismaTitle: 'PRISMA counts',
+  prismaEmptyTitle: 'No records screened yet',
+  prismaEmptyBody: 'Counts appear once articles are enrolled for screening.',
+  prismaIdentification: 'Identification',
+  prismaSourcePubmed: 'PubMed',
+  prismaSourceZotero: 'Zotero',
+  prismaSourceRis: 'RIS',
+  prismaSourceManual: 'Manual',
+  prismaIdentifiedTotal: 'Records identified',
+  prismaDuplicates: 'Duplicates removed',
+  prismaNotRetrieved: 'Records not retrieved from the source',
+  prismaNotEnrolled: 'Imported but not enrolled',
+  prismaScreening: 'Title and abstract screening',
+  prismaScreened: 'Records screened',
+  prismaExcluded: 'Records excluded',
+  prismaReasonsDiffer: 'Reasons differ',
+  prismaNoReason: 'No reason given',
+  prismaSought: 'Sought for retrieval',
+
   // Errors (`lib/screening/errors.ts`): no `{{…}}` placeholders — the mapper fills nothing.
   errorConfigFrozen: 'Reviewers per record cannot change after the first decision.',
   errorTooFewReviewers: 'The project has fewer reviewers than that.',

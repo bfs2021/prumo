@@ -21,6 +21,7 @@ export type ScreeningAssignmentRead = components['schemas']['ScreeningAssignment
 export type ScreeningDecisionCreate = components['schemas']['ScreeningDecisionCreate'];
 export type ScreeningConflictsRead = components['schemas']['ScreeningConflictsRead'];
 export type ScreeningArbitrationCreate = components['schemas']['ScreeningArbitrationCreate'];
+export type PrismaCountsRead = components['schemas']['PrismaCountsRead'];
 
 export function fetchScreeningConfig(projectId: string): Promise<ErrorResult<ScreeningConfigRead>> {
   return toResult(
@@ -151,5 +152,13 @@ export function submitArbitration(
         body,
       }),
     'screeningService.submitArbitration',
+  );
+}
+
+/** The PRISMA identification and screening numbers. Outcomes only: no pending or in-conflict count. 403 for a non-member. */
+export function fetchPrismaCounts(projectId: string): Promise<ErrorResult<PrismaCountsRead>> {
+  return toResult(
+    () => apiClient<PrismaCountsRead>(`/api/v1/projects/${projectId}/prisma`),
+    'screeningService.fetchPrismaCounts',
   );
 }

@@ -8,4 +8,10 @@ describe('Sidebar config — Screening tab', () => {
     expect(item).toBeDefined();
     expect(item?.comingSoon).not.toBe(true);
   });
+
+  it('PRISMA report is not a coming-soon placeholder', () => {
+    const item = sidebarItems.find((i) => i.id === 'prisma');
+    expect(item).toBeDefined();
+    expect(item?.comingSoon).not.toBe(true);
+  });
 });

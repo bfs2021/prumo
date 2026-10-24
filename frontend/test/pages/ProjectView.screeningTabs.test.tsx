@@ -1,6 +1,6 @@
 /**
- * ProjectView renders the Screening tab itself, no longer the coming-soon
- * placeholder.
+ * ProjectView renders the Screening and PRISMA tabs themselves, no longer
+ * the coming-soon placeholder.
  */
 import {render, screen} from '@testing-library/react';
 import {MemoryRouter, Route, Routes} from 'react-router';
@@ -13,6 +13,9 @@ vi.mock('@/services/projectsService', () => ({
 }));
 vi.mock('@/components/screening/ScreeningTab', () => ({
     ScreeningTab: ({projectId}: {projectId: string}) => <div data-testid="screening-tab" data-project-id={projectId}/>,
+}));
+vi.mock('@/components/prisma/PrismaCountsPanel', () => ({
+    PrismaCountsPanel: ({projectId}: {projectId: string}) => <div data-testid="prisma-panel" data-project-id={projectId}/>,
 }));
 
 import ProjectView from '@/pages/ProjectView';
@@ -46,6 +49,14 @@ describe('ProjectView screening tab', () => {
 
         const tab = await screen.findByTestId('screening-tab');
         expect(tab).toHaveAttribute('data-project-id', 'p1');
+        expect(screen.queryByText('Coming soon')).toBeNull();
+    });
+
+    it('renders the PRISMA counts for ?tab=prisma', async () => {
+        renderAt('/projects/p1?tab=prisma');
+
+        const panel = await screen.findByTestId('prisma-panel');
+        expect(panel).toHaveAttribute('data-project-id', 'p1');
         expect(screen.queryByText('Coming soon')).toBeNull();
     });
 });
