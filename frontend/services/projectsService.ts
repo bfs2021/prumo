@@ -101,19 +101,31 @@ const PROJECT_ARTICLES_SELECT = [
 /**
  * Load all articles for a project (list projection — no large text blobs).
  *
+ * PostgREST caps a response at the project's max-rows (1,000 on hosted
+ * Supabase), so a single read silently truncates and every counter built from
+ * the array's length stops there: page with `.range()` until a short page
+ * comes back (#1054).
+ *
  * NOTE: errors are logged by the caller; no toast.
  */
 export function loadProjectArticles(
   projectId: string,
 ): Promise<ErrorResult<Article[]>> {
   return toResult(async () => {
-    const {data, error} = await supabase
-      .from('articles')
-      .select(PROJECT_ARTICLES_SELECT)
-      .eq('project_id', projectId)
-      .order('created_at', {ascending: false});
-    if (error) throw error;
-    return (data as unknown as Article[]) ?? [];
+    const PAGE_SIZE = 1000;
+    const all: Article[] = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const {data, error} = await supabase
+        .from('articles')
+        .select(PROJECT_ARTICLES_SELECT)
+        .eq('project_id', projectId)
+        .order('created_at', {ascending: false})
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) throw error;
+      const page = (data as unknown as Article[]) ?? [];
+      all.push(...page);
+      if (page.length < PAGE_SIZE) return all;
+    }
   }, 'projectsService.loadProjectArticles');
 }
 
