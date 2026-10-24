@@ -3,7 +3,7 @@
  * `peer_decisions` and `outcome` exactly as the API returns them.
  */
 import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
-import {render, screen, waitFor} from '@testing-library/react';
+import {fireEvent, render, screen, waitFor} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {http, HttpResponse} from 'msw';
 import {describe, expect, it, vi} from 'vitest';
@@ -148,6 +148,46 @@ describe('AssignmentView', () => {
 
     await waitFor(() => expect(body).toEqual({decision: 'exclude'}));
     await waitFor(() => expect(calls.count).toBe(2));
+  });
+
+  it('sends one decision for two back-to-back keys', async () => {
+    serveAssignment(assignment());
+    const bodies: unknown[] = [];
+    server.use(
+      http.post(DECIDE_URL, async ({request}) => {
+        bodies.push(await request.json());
+        return HttpResponse.json({ok: true, data: assignment()});
+      }),
+    );
+    renderView({canReview: true});
+    await screen.findByRole('heading', {name: 'Deep learning for sepsis'});
+
+    fireEvent.keyDown(window, {key: '1'});
+    fireEvent.keyDown(window, {key: '2'});
+
+    await waitFor(() => expect(bodies.length).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bodies).toEqual([{decision: 'include'}]);
+  });
+
+  it('decides again once the first decision settles', async () => {
+    serveAssignment(assignment());
+    const bodies: unknown[] = [];
+    server.use(
+      http.post(DECIDE_URL, async ({request}) => {
+        bodies.push(await request.json());
+        return HttpResponse.json({ok: true, data: assignment()});
+      }),
+    );
+    const user = userEvent.setup();
+    renderView({canReview: true});
+    await screen.findByRole('heading', {name: 'Deep learning for sepsis'});
+
+    await user.click(screen.getByRole('button', {name: 'Include'}));
+    await waitFor(() => expect(screen.getByRole('button', {name: 'Exclude'})).toBeEnabled());
+    await user.click(screen.getByRole('button', {name: 'Exclude'}));
+
+    await waitFor(() => expect(bodies).toEqual([{decision: 'include'}, {decision: 'exclude'}]));
   });
 
   it('hides decision buttons from viewers', async () => {

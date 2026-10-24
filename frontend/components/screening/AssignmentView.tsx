@@ -4,7 +4,7 @@
  * A reviewer may change the decision here; anyone else only reads.
  */
 import {ArrowLeft} from 'lucide-react';
-import type {ReactNode} from 'react';
+import {useRef, type ReactNode} from 'react';
 import {toast} from 'sonner';
 
 import {ErrorState} from '@/components/patterns/ErrorState';
@@ -104,6 +104,9 @@ interface AssignmentViewProps {
 export function AssignmentView({assignmentId, canReview, onBack}: AssignmentViewProps) {
   const query = useScreeningAssignment(assignmentId);
   const decide = useDecide(query.data?.project_id ?? '');
+  // `isPending` reaches the buttons only after a re-render; two keys pressed
+  // before it would both post. This flag flips at once.
+  const inFlight = useRef(false);
 
   const back = (
     <Button variant="ghost" onClick={onBack} className="self-start">
@@ -123,8 +126,19 @@ export function AssignmentView({assignmentId, canReview, onBack}: AssignmentView
   }
 
   const read = query.data;
-  const onDecide = (body: ScreeningDecisionCreate) =>
-    decide.mutate({assignmentId, body}, {onError: (error) => toast.error(screeningErrorMessage(error))});
+  const onDecide = (body: ScreeningDecisionCreate) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    decide.mutate(
+      {assignmentId, body},
+      {
+        onError: (error) => toast.error(screeningErrorMessage(error)),
+        onSettled: () => {
+          inFlight.current = false;
+        },
+      },
+    );
+  };
 
   return (
     <div className="flex min-h-0 flex-col">

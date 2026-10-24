@@ -132,6 +132,21 @@ describe('ScreeningQueue', () => {
     expect(posted).toEqual([]);
   });
 
+  it('sends one decision for two back-to-back keys', async () => {
+    serveQueue(queue());
+    const posted = serveDecision();
+    renderQueue();
+    await screen.findByRole('heading', {name: 'Title a1'});
+
+    // No re-render between the two keys: `isPending` has not reached the props yet.
+    fireEvent.keyDown(window, {key: '1'});
+    fireEvent.keyDown(window, {key: '2'});
+
+    await waitFor(() => expect(posted.length).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(posted).toEqual([{assignmentId: 'a1', body: {decision: 'include'}}]);
+  });
+
   it('excludes with a numbered reason', async () => {
     serveQueue(queue({exclusion_reasons: ['Wrong population', 'Not ML']}));
     const posted = serveDecision();

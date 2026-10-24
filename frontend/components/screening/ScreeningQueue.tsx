@@ -4,7 +4,7 @@
  * abstract runs. A decision advances at once (the hook removes the record
  * from the cache); the server's refetch settles the counts.
  */
-import {useState} from 'react';
+import {useRef, useState} from 'react';
 import {Link, useSearchParams} from 'react-router';
 import {toast} from 'sonner';
 
@@ -35,6 +35,9 @@ export function ScreeningQueue({projectId}: {projectId: string}) {
   const query = useScreeningQueue(projectId, true);
   const decide = useDecide(projectId);
   const [lastDecided, setLastDecided] = useState<string | null>(null);
+  // `isPending` reaches the buttons only after a re-render; two keys pressed
+  // before it would both decide the same record. This flag flips at once.
+  const inFlight = useRef(false);
 
   if (query.isPending) return <LoadingState />;
   if (query.isError) {
@@ -67,12 +70,17 @@ export function ScreeningQueue({projectId}: {projectId: string}) {
   }
 
   const onDecide = (body: ScreeningDecisionCreate) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     const assignmentId = current.assignment_id;
     decide.mutate(
       {assignmentId, body},
       {
         onSuccess: () => setLastDecided(assignmentId),
         onError: (error) => toast.error(screeningErrorMessage(error)),
+        onSettled: () => {
+          inFlight.current = false;
+        },
       },
     );
   };
