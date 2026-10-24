@@ -4,20 +4,48 @@
  * → running. Managers act in each state; members get a notice saying who
  * acts. Every member can import from PubMed where nothing is enrolled and in
  * the running header. While running, `?assignment=<id>` opens that record for
- * any member; otherwise a reviewer gets the queue.
+ * any member; otherwise a reviewer gets the queue and an arbitrator the
+ * conflicts list (a tab beside the queue when they also review).
  */
+import {useState} from 'react';
 import {useSearchParams} from 'react-router';
 
 import {ErrorState} from '@/components/patterns/ErrorState';
+import {Tabs, TabsContent, TabsList, TabsTrigger} from '@/components/ui/tabs';
 import {useScreeningConfig} from '@/hooks/screening/useScreeningConfig';
+import {useScreeningConflicts} from '@/hooks/screening/useScreeningConflicts';
 import {t} from '@/lib/copy';
 import {screeningErrorMessage} from '@/lib/screening/errors';
 
 import {AssignmentView} from './AssignmentView';
+import {ConflictsPanel} from './ConflictsPanel';
 import {ScreeningConfigForm} from './ScreeningConfigForm';
 import {LoadingState, Notice} from './ScreeningParts';
 import {EnrollAllButton, PubMedImportButton, ScreeningHeader} from './ScreeningHeader';
 import {ScreeningQueue} from './ScreeningQueue';
+
+/** The arbitrator's running view: the conflicts list, beside the queue when they also review. */
+function ArbitratorWorkspace({projectId, canReview}: {projectId: string; canReview: boolean}) {
+  const [tab, setTab] = useState(canReview ? 'queue' : 'conflicts');
+  const conflicts = useScreeningConflicts(projectId, true);
+  const count = conflicts.data ? String(conflicts.data.items.length) : '…';
+  return (
+    <Tabs value={tab} onValueChange={setTab}>
+      <TabsList className="mx-4 mt-3 self-start">
+        {canReview && <TabsTrigger value="queue">{t('screening', 'tabQueue')}</TabsTrigger>}
+        <TabsTrigger value="conflicts">{t('screening', 'tabConflictsCount').replace('{{n}}', count)}</TabsTrigger>
+      </TabsList>
+      {canReview && (
+        <TabsContent value="queue" className="mt-0">
+          <ScreeningQueue projectId={projectId} />
+        </TabsContent>
+      )}
+      <TabsContent value="conflicts" className="mt-0">
+        <ConflictsPanel projectId={projectId} />
+      </TabsContent>
+    </Tabs>
+  );
+}
 
 export function ScreeningTab({projectId, onImportComplete}: {projectId: string; onImportComplete?: () => void}) {
   const query = useScreeningConfig(projectId);
@@ -86,6 +114,8 @@ export function ScreeningTab({projectId, onImportComplete}: {projectId: string; 
       <ScreeningHeader projectId={projectId} config={config} onImportComplete={onImportComplete} />
       {assignmentId ? (
         <AssignmentView assignmentId={assignmentId} canReview={config.can_review} onBack={closeAssignment} />
+      ) : config.can_arbitrate ? (
+        <ArbitratorWorkspace projectId={projectId} canReview={config.can_review} />
       ) : config.can_review ? (
         <ScreeningQueue projectId={projectId} />
       ) : (

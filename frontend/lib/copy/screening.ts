@@ -93,6 +93,17 @@ export const screening = {
   peerUnnamed: 'Another reviewer',
   backToQueue: 'Back to screening',
 
+  // Conflicts and arbitration
+  tabQueue: 'Screen',
+  tabConflictsCount: 'Conflicts ({{n}})',
+  conflictsEmptyTitle: 'No conflicts to resolve',
+  conflictsEmptyBody: 'Records where reviewers disagree appear here.',
+  useDecisionOf: "Use {{name}}'s decision",
+  unnamedReviewer: 'A reviewer',
+  decideDifferently: 'Decide differently',
+  rulingNote: 'Note for the record (optional)',
+  rulingSaved: 'Conflict resolved',
+
   // Errors (`lib/screening/errors.ts`): no `{{…}}` placeholders — the mapper fills nothing.
   errorConfigFrozen: 'Reviewers per record cannot change after the first decision.',
   errorTooFewReviewers: 'The project has fewer reviewers than that.',
@@ -100,6 +111,8 @@ export const screening = {
   errReviewerCap: 'This record already has all its reviewers.',
   errReasonsChanged: "The protocol's exclusion reasons changed. Reload and pick again.",
   errNotConfigured: 'Screening is not set up for this project.',
+  errStaleDecisions: 'The decisions changed since you opened this conflict. It has been reloaded.',
+  errNotInConflict: 'This record is no longer in conflict.',
   errQueueUnavailable: 'The import queue is unavailable. The import may not have started. Try again later.',
   errorValidation: 'That was not accepted. Check what you entered and try again.',
   errorForbidden: 'You do not have permission to do this.',

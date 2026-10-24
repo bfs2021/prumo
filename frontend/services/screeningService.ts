@@ -19,6 +19,8 @@ export type ImportRunRead = components['schemas']['ImportRunRead'];
 export type ScreeningQueueRead = components['schemas']['ScreeningQueueRead'];
 export type ScreeningAssignmentRead = components['schemas']['ScreeningAssignmentRead'];
 export type ScreeningDecisionCreate = components['schemas']['ScreeningDecisionCreate'];
+export type ScreeningConflictsRead = components['schemas']['ScreeningConflictsRead'];
+export type ScreeningArbitrationCreate = components['schemas']['ScreeningArbitrationCreate'];
 
 export function fetchScreeningConfig(projectId: string): Promise<ErrorResult<ScreeningConfigRead>> {
   return toResult(
@@ -123,5 +125,31 @@ export function submitDecision(
         body,
       }),
     'screeningService.submitDecision',
+  );
+}
+
+/** Records whose reviewers disagree, with every current decision. 403 unless the caller arbitrates. */
+export function fetchConflicts(projectId: string): Promise<ErrorResult<ScreeningConflictsRead>> {
+  return toResult(
+    () => apiClient<ScreeningConflictsRead>(`/api/v1/projects/${projectId}/screening/conflicts`),
+    'screeningService.fetchConflicts',
+  );
+}
+
+/**
+ * 409 SCREENING_STALE_DECISIONS when the decisions changed since the list
+ * loaded; 409 SCREENING_NOT_IN_CONFLICT / SCREENING_UNKNOWN_EXCLUSION_REASON; 404 for a foreign decision id.
+ */
+export function submitArbitration(
+  assignmentId: string,
+  body: ScreeningArbitrationCreate,
+): Promise<ErrorResult<ScreeningAssignmentRead>> {
+  return toResult(
+    () =>
+      apiClient<ScreeningAssignmentRead>(`/api/v1/screening/assignments/${assignmentId}/arbitration`, {
+        method: 'POST',
+        body,
+      }),
+    'screeningService.submitArbitration',
   );
 }

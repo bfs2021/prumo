@@ -20,6 +20,8 @@ const CODE_TO_KEY: Record<string, ScreeningCopyKey> = {
   SCREENING_REVIEWER_CAP: 'errReviewerCap',
   SCREENING_UNKNOWN_EXCLUSION_REASON: 'errReasonsChanged',
   SCREENING_NOT_CONFIGURED: 'errNotConfigured',
+  SCREENING_STALE_DECISIONS: 'errStaleDecisions',
+  SCREENING_NOT_IN_CONFLICT: 'errNotInConflict',
 };
 
 export function screeningErrorMessage(error: unknown): string {

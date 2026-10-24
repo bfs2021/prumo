@@ -46,20 +46,29 @@ export function decisionLabel(decision: ScreeningDecisionCreate['decision']): st
   return t('screening', DECISION_LABEL[decision]);
 }
 
-/** The record as read for screening: title, `authors · journal · year`, abstract or its absence. */
-export function RecordBody({article}: {article: ScreeningArticle}) {
+/** `authors · journal · year`, then the abstract or its absence. */
+export function RecordAbstract({article}: {article: ScreeningArticle}) {
   const byline = [article.authors?.join(', '), article.journal_title, article.publication_year]
     .filter((part) => part !== null && part !== undefined && part !== '')
     .join(' · ');
   return (
-    <article className="flex min-w-0 flex-col gap-2">
-      <h2 className="text-base font-semibold leading-snug text-foreground">{article.title}</h2>
+    <>
       {byline && <p className="text-[13px] text-muted-foreground">{byline}</p>}
       {article.abstract ? (
         <p className="whitespace-pre-line text-sm leading-relaxed text-foreground">{article.abstract}</p>
       ) : (
         <p className="text-sm italic text-muted-foreground">{t('screening', 'noAbstract')}</p>
       )}
+    </>
+  );
+}
+
+/** The record as read for screening: title, then its byline and abstract. */
+export function RecordBody({article}: {article: ScreeningArticle}) {
+  return (
+    <article className="flex min-w-0 flex-col gap-2">
+      <h2 className="text-base font-semibold leading-snug text-foreground">{article.title}</h2>
+      <RecordAbstract article={article} />
     </article>
   );
 }

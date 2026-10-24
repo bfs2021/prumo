@@ -26,6 +26,7 @@ type ConfigRead = components['schemas']['ScreeningConfigRead'];
 const CONFIG_URL = '*/api/v1/projects/:projectId/screening/config';
 const ENROLL_URL = '*/api/v1/projects/:projectId/screening/enroll';
 const QUEUE_URL = '*/api/v1/projects/:projectId/screening/queue';
+const CONFLICTS_URL = '*/api/v1/projects/:projectId/screening/conflicts';
 const ASSIGNMENT_URL = '*/api/v1/screening/assignments/:assignmentId';
 
 function config(overrides: Partial<ConfigRead> = {}): ConfigRead {
@@ -283,6 +284,83 @@ describe('ScreeningTab', () => {
     renderTab();
     expect(await screen.findByRole('heading', {name: 'Deep learning for sepsis'})).toBeInTheDocument();
     expect(screen.getByRole('button', {name: 'Include'})).toBeInTheDocument();
+  });
+
+  it('gives arbitrators a conflicts tab with its count', async () => {
+    serveConfig(config({can_manage: false, can_review: true, can_arbitrate: true, reviewer_count: 2, enrolled: 3}));
+    server.use(
+      http.get(QUEUE_URL, () =>
+        ok({
+          items: [{assignment_id: 'a1', article: ARTICLE}],
+          awaiting_me: 1,
+          awaiting_others: 0,
+          exclusion_reasons: [],
+        }),
+      ),
+      http.get(CONFLICTS_URL, () =>
+        ok({
+          exclusion_reasons: [],
+          items: [
+            {assignment_id: 'c1', article: {...ARTICLE, id: 'art2', title: 'Conflicted one'}, decisions: []},
+            {assignment_id: 'c2', article: {...ARTICLE, id: 'art3', title: 'Conflicted two'}, decisions: []},
+          ],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderTab();
+
+    expect(await screen.findByRole('heading', {name: 'Deep learning for sepsis'})).toBeInTheDocument();
+    await user.click(await screen.findByRole('tab', {name: 'Conflicts (2)'}));
+    expect(await screen.findByText('Conflicted one')).toBeInTheDocument();
+    expect(screen.getByText('Conflicted two')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', {name: 'Screen'}));
+    expect(await screen.findByRole('heading', {name: 'Deep learning for sepsis'})).toBeInTheDocument();
+  });
+
+  it('shows an arbitrator who does not review the conflicts list', async () => {
+    serveConfig(config({can_manage: false, can_review: false, can_arbitrate: true, reviewer_count: 2, enrolled: 3}));
+    server.use(
+      http.get(CONFLICTS_URL, () =>
+        ok({
+          exclusion_reasons: [],
+          items: [{assignment_id: 'c1', article: {...ARTICLE, title: 'Conflicted one'}, decisions: []}],
+        }),
+      ),
+    );
+    renderTab();
+
+    expect(await screen.findByText('Conflicted one')).toBeInTheDocument();
+    expect(screen.getByRole('tab', {name: 'Conflicts (1)'})).toBeInTheDocument();
+    expect(screen.queryByRole('tab', {name: 'Screen'})).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('You can follow screening here. Only reviewers screen records.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('never requests conflicts for a non-arbitrator', async () => {
+    serveConfig(config({can_manage: false, can_review: true, can_arbitrate: false, reviewer_count: 2, enrolled: 3}));
+    let conflictCalls = 0;
+    server.use(
+      http.get(QUEUE_URL, () =>
+        ok({
+          items: [{assignment_id: 'a1', article: ARTICLE}],
+          awaiting_me: 1,
+          awaiting_others: 0,
+          exclusion_reasons: [],
+        }),
+      ),
+      http.get(CONFLICTS_URL, () => {
+        conflictCalls += 1;
+        return ok({exclusion_reasons: [], items: []});
+      }),
+    );
+    renderTab();
+
+    expect(await screen.findByRole('heading', {name: 'Deep learning for sepsis'})).toBeInTheDocument();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+    expect(conflictCalls).toBe(0);
   });
 
   it('opens a record from ?assignment', async () => {
