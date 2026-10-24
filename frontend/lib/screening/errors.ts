@@ -17,6 +17,9 @@ const CODE_TO_KEY: Record<string, ScreeningCopyKey> = {
   VALIDATION_ERROR: 'errorValidation',
   NCBI_EMAIL_NOT_CONFIGURED: 'errNcbiEmailMissing',
   SERVICE_UNAVAILABLE: 'errQueueUnavailable',
+  SCREENING_REVIEWER_CAP: 'errReviewerCap',
+  SCREENING_UNKNOWN_EXCLUSION_REASON: 'errReasonsChanged',
+  SCREENING_NOT_CONFIGURED: 'errNotConfigured',
 };
 
 export function screeningErrorMessage(error: unknown): string {

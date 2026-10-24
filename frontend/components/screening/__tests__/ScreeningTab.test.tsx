@@ -7,6 +7,7 @@ import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
 import {render, screen, waitFor} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {http, HttpResponse} from 'msw';
+import {MemoryRouter} from 'react-router';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 vi.mock('@/integrations/supabase/client', () => ({
@@ -24,6 +25,8 @@ type ConfigRead = components['schemas']['ScreeningConfigRead'];
 
 const CONFIG_URL = '*/api/v1/projects/:projectId/screening/config';
 const ENROLL_URL = '*/api/v1/projects/:projectId/screening/enroll';
+const QUEUE_URL = '*/api/v1/projects/:projectId/screening/queue';
+const ASSIGNMENT_URL = '*/api/v1/screening/assignments/:assignmentId';
 
 function config(overrides: Partial<ConfigRead> = {}): ConfigRead {
   return {
@@ -54,14 +57,27 @@ function serveConfig(read: ConfigRead) {
   return calls;
 }
 
-function renderTab() {
+function renderTab(path = '/projects/p1?tab=screening') {
   const client = new QueryClient({defaultOptions: {queries: {retry: false, gcTime: 0}}});
   return render(
     <QueryClientProvider client={client}>
-      <ScreeningTab projectId="p1" />
+      <MemoryRouter initialEntries={[path]}>
+        <ScreeningTab projectId="p1" />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
+
+const ARTICLE = {
+  id: 'art1',
+  title: 'Deep learning for sepsis',
+  abstract: 'An abstract.',
+  authors: null,
+  doi: null,
+  journal_title: null,
+  pmid: null,
+  publication_year: null,
+};
 
 beforeEach(() => {
   vi.mocked(toast.success).mockClear();
@@ -250,5 +266,83 @@ describe('ScreeningTab', () => {
     await waitFor(() => expect(body).toEqual({}));
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('2 articles enrolled'));
     await waitFor(() => expect(calls.count).toBe(2));
+  });
+
+  it('gives reviewers the queue', async () => {
+    serveConfig(config({can_manage: false, can_review: true, reviewer_count: 2, enrolled: 3}));
+    server.use(
+      http.get(QUEUE_URL, () =>
+        ok({
+          items: [{assignment_id: 'a1', article: ARTICLE}],
+          awaiting_me: 1,
+          awaiting_others: 0,
+          exclusion_reasons: [],
+        }),
+      ),
+    );
+    renderTab();
+    expect(await screen.findByRole('heading', {name: 'Deep learning for sepsis'})).toBeInTheDocument();
+    expect(screen.getByRole('button', {name: 'Include'})).toBeInTheDocument();
+  });
+
+  it('opens a record from ?assignment', async () => {
+    serveConfig(
+      config({can_manage: false, can_review: false, can_arbitrate: false, reviewer_count: 2, enrolled: 3}),
+    );
+    server.use(
+      http.get(ASSIGNMENT_URL, ({params}) =>
+        ok({
+          id: params.assignmentId,
+          project_id: 'p1',
+          status: 'decided',
+          exclusion_reasons: [],
+          article: ARTICLE,
+          my_decision: null,
+          outcome: {decision: 'include', exclusion_reason: null, kind: 'solo', reasons_differ: false},
+          peer_decisions: [],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderTab('/projects/p1?tab=screening&assignment=a1');
+    expect(await screen.findByRole('heading', {name: 'Deep learning for sepsis'})).toBeInTheDocument();
+    expect(screen.getByText('single reviewer')).toBeInTheDocument();
+    expect(screen.queryByRole('button', {name: 'Include'})).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', {name: 'Back to screening'}));
+    expect(
+      await screen.findByText('You can follow screening here. Only reviewers screen records.'),
+    ).toBeInTheDocument();
+  });
+
+  it('leaves decision keys to another open dialog', async () => {
+    serveConfig(config({can_manage: false, can_review: true, reviewer_count: 2, enrolled: 3}));
+    server.use(
+      http.get(QUEUE_URL, () =>
+        ok({
+          items: [{assignment_id: 'a1', article: ARTICLE}],
+          awaiting_me: 1,
+          awaiting_others: 0,
+          exclusion_reasons: [],
+        }),
+      ),
+    );
+    let posted = 0;
+    server.use(
+      http.post('*/api/v1/screening/assignments/:assignmentId/decisions', () => {
+        posted += 1;
+        return ok({});
+      }),
+    );
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByRole('heading', {name: 'Deep learning for sepsis'});
+
+    await user.click(screen.getByRole('button', {name: 'Import from PubMed'}));
+    await screen.findByRole('dialog', {name: 'Import from PubMed'});
+    await user.keyboard('1');
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(posted).toBe(0);
   });
 });

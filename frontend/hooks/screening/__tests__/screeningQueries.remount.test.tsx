@@ -12,13 +12,19 @@ import {describe, expect, it, vi} from 'vitest';
 
 const fetchScreeningConfig = vi.fn();
 const fetchImportRun = vi.fn();
+const fetchScreeningQueue = vi.fn();
+const fetchAssignment = vi.fn();
 vi.mock('@/services/screeningService', () => ({
   fetchScreeningConfig: (...args: unknown[]) => fetchScreeningConfig(...args),
   fetchImportRun: (...args: unknown[]) => fetchImportRun(...args),
+  fetchScreeningQueue: (...args: unknown[]) => fetchScreeningQueue(...args),
+  fetchAssignment: (...args: unknown[]) => fetchAssignment(...args),
 }));
 
 import {useImportRun} from '@/hooks/screening/usePubmedImport';
+import {useScreeningAssignment} from '@/hooks/screening/useScreeningAssignment';
 import {useScreeningConfig} from '@/hooks/screening/useScreeningConfig';
+import {useScreeningQueue} from '@/hooks/screening/useScreeningQueue';
 
 // The app's default freshness window (frontend/App.tsx): a cached read inside
 // it is fresh, so only refetchOnMount can make a remount fetch again.
@@ -33,6 +39,8 @@ type Row = [name: string, useHook: () => {data: unknown; isSuccess: boolean; isS
 const ROWS: Row[] = [
   ['useScreeningConfig', () => useScreeningConfig('p1'), fetchScreeningConfig],
   ['useImportRun', () => useImportRun('p1', 's1'), fetchImportRun],
+  ['useScreeningQueue', () => useScreeningQueue('p1', true), fetchScreeningQueue],
+  ['useScreeningAssignment', () => useScreeningAssignment('a1'), fetchAssignment],
 ];
 
 function wrapper() {

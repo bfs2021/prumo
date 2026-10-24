@@ -3,47 +3,32 @@
  * checked in order: loading → load error → not configured → nothing enrolled
  * → running. Managers act in each state; members get a notice saying who
  * acts. Every member can import from PubMed where nothing is enrolled and in
- * the running header. Reviewer and arbitrator bodies of the running state land later.
+ * the running header. While running, `?assignment=<id>` opens that record for
+ * any member; otherwise a reviewer gets the queue.
  */
-import {useId, type ReactNode} from 'react';
+import {useSearchParams} from 'react-router';
 
 import {ErrorState} from '@/components/patterns/ErrorState';
-import {Skeleton} from '@/components/ui/skeleton';
 import {useScreeningConfig} from '@/hooks/screening/useScreeningConfig';
 import {t} from '@/lib/copy';
 import {screeningErrorMessage} from '@/lib/screening/errors';
 
+import {AssignmentView} from './AssignmentView';
 import {ScreeningConfigForm} from './ScreeningConfigForm';
+import {LoadingState, Notice} from './ScreeningParts';
 import {EnrollAllButton, PubMedImportButton, ScreeningHeader} from './ScreeningHeader';
-
-function Notice({title, body, children}: {title: string; body: string; children?: ReactNode}) {
-  return (
-    <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-sm font-medium text-foreground">{title}</h2>
-        <p className="max-w-sm text-[13px] text-muted-foreground">{body}</p>
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function LoadingState() {
-  const labelId = useId();
-  return (
-    <section aria-busy="true" aria-labelledby={labelId} className="flex flex-col gap-2 p-2">
-      <span id={labelId} className="sr-only">
-        {t('screening', 'loading')}
-      </span>
-      <Skeleton className="h-8 w-full" />
-      <Skeleton className="h-5 w-2/3" />
-      <Skeleton className="h-5 w-1/2" />
-    </section>
-  );
-}
+import {ScreeningQueue} from './ScreeningQueue';
 
 export function ScreeningTab({projectId, onImportComplete}: {projectId: string; onImportComplete?: () => void}) {
   const query = useScreeningConfig(projectId);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const assignmentId = searchParams.get('assignment');
+  const closeAssignment = () =>
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('assignment');
+      return next;
+    });
 
   if (query.isPending) return <LoadingState />;
   if (query.isError) {
@@ -99,8 +84,14 @@ export function ScreeningTab({projectId, onImportComplete}: {projectId: string; 
   return (
     <div className="flex flex-col">
       <ScreeningHeader projectId={projectId} config={config} onImportComplete={onImportComplete} />
-      {isViewer && (
-        <p className="px-4 py-12 text-center text-[13px] text-muted-foreground">{t('screening', 'viewerNotice')}</p>
+      {assignmentId ? (
+        <AssignmentView assignmentId={assignmentId} canReview={config.can_review} onBack={closeAssignment} />
+      ) : config.can_review ? (
+        <ScreeningQueue projectId={projectId} />
+      ) : (
+        isViewer && (
+          <p className="px-4 py-12 text-center text-[13px] text-muted-foreground">{t('screening', 'viewerNotice')}</p>
+        )
       )}
     </div>
   );

@@ -16,6 +16,9 @@ export type ScreeningEnrollResult = components['schemas']['ScreeningEnrollResult
 export type PubmedDryRunRead = components['schemas']['PubmedDryRunRead'];
 export type PubmedImportStarted = components['schemas']['PubmedImportStarted'];
 export type ImportRunRead = components['schemas']['ImportRunRead'];
+export type ScreeningQueueRead = components['schemas']['ScreeningQueueRead'];
+export type ScreeningAssignmentRead = components['schemas']['ScreeningAssignmentRead'];
+export type ScreeningDecisionCreate = components['schemas']['ScreeningDecisionCreate'];
 
 export function fetchScreeningConfig(projectId: string): Promise<ErrorResult<ScreeningConfigRead>> {
   return toResult(
@@ -89,5 +92,36 @@ export function fetchImportRun(projectId: string, syncRunId: string): Promise<Er
   return toResult(
     () => apiClient<ImportRunRead>(`/api/v1/projects/${projectId}/imports/${syncRunId}`),
     'screeningService.fetchImportRun',
+  );
+}
+
+/** Up to 20 records awaiting the caller, in queue order. 409 SCREENING_NOT_CONFIGURED on an unconfigured project. */
+export function fetchScreeningQueue(projectId: string): Promise<ErrorResult<ScreeningQueueRead>> {
+  return toResult(
+    () => apiClient<ScreeningQueueRead>(`/api/v1/projects/${projectId}/screening/queue`),
+    'screeningService.fetchScreeningQueue',
+  );
+}
+
+/** One record as the caller may see it; peers stay hidden until there is an outcome. 404 missing, 403 non-member. */
+export function fetchAssignment(assignmentId: string): Promise<ErrorResult<ScreeningAssignmentRead>> {
+  return toResult(
+    () => apiClient<ScreeningAssignmentRead>(`/api/v1/screening/assignments/${assignmentId}`),
+    'screeningService.fetchAssignment',
+  );
+}
+
+/** 409 SCREENING_REVIEWER_CAP / SCREENING_UNKNOWN_EXCLUSION_REASON / SCREENING_NOT_CONFIGURED; 403 for a viewer. */
+export function submitDecision(
+  assignmentId: string,
+  body: ScreeningDecisionCreate,
+): Promise<ErrorResult<ScreeningAssignmentRead>> {
+  return toResult(
+    () =>
+      apiClient<ScreeningAssignmentRead>(`/api/v1/screening/assignments/${assignmentId}/decisions`, {
+        method: 'POST',
+        body,
+      }),
+    'screeningService.submitDecision',
   );
 }
