@@ -1,4 +1,4 @@
-"""Title/abstract screening: project config, enrollment, the blind queue and decisions."""
+"""Title/abstract screening: project config, enrollment, the blind queue, decisions, arbitration."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.deps.scope import load_assignment_for_member
 from app.api.deps.security import (
+    ensure_project_arbitrator,
     ensure_project_reviewer,
     get_current_user_sub,
     require_project_manager,
@@ -16,9 +17,11 @@ from app.api.deps.security import (
 from app.core.deps import DbSession
 from app.schemas.common import ApiResponse
 from app.schemas.screening import (
+    ScreeningArbitrationCreate,
     ScreeningAssignmentRead,
     ScreeningConfigRead,
     ScreeningConfigUpdate,
+    ScreeningConflictsRead,
     ScreeningDecisionCreate,
     ScreeningEnrollRequest,
     ScreeningEnrollResult,
@@ -26,7 +29,11 @@ from app.schemas.screening import (
 )
 from app.services.article_read_service import ArticleNotFoundError
 from app.services.screening_config_service import ProjectNotFoundError, ScreeningConfigService
-from app.services.screening_review_service import AssignmentNotFoundError, ScreeningReviewService
+from app.services.screening_review_service import (
+    AssignmentNotFoundError,
+    DecisionNotFoundError,
+    ScreeningReviewService,
+)
 from app.utils.rate_limiter import limiter
 
 router = APIRouter()
@@ -168,6 +175,64 @@ async def post_screening_decision(
     except AssignmentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=_ASSIGNMENT_NOT_FOUND
+        ) from exc
+    await db.commit()
+    return ApiResponse.success(assignment, trace_id=getattr(request.state, "trace_id", None))
+
+
+@router.get(
+    "/projects/{project_id}/screening/conflicts",
+    responses={403: {"description": "Manager or consensus role required"}},
+)
+@limiter.limit("60/minute")
+async def get_screening_conflicts(
+    request: Request,
+    project_id: UUID,
+    db: DbSession,
+    user_sub: UUID = Depends(get_current_user_sub),
+) -> ApiResponse[ScreeningConflictsRead]:
+    await ensure_project_arbitrator(db, project_id, user_sub)
+    conflicts = await ScreeningReviewService(db).conflicts(project_id, user_sub)
+    return ApiResponse.success(conflicts, trace_id=getattr(request.state, "trace_id", None))
+
+
+@router.post(
+    "/screening/assignments/{assignment_id}/arbitration",
+    responses={
+        403: {"description": "Manager or consensus role required in the assignment's project"},
+        404: {
+            "description": (
+                "Assignment not found, its article left the project, "
+                "or a decision is not in this assignment"
+            )
+        },
+        409: {
+            "description": (
+                "Screening not set up, the record is not in conflict, the decisions "
+                "changed since it was opened, or the exclusion reason is not in the protocol"
+            )
+        },
+    },
+)
+@limiter.limit("60/minute")
+async def post_screening_arbitration(
+    request: Request,
+    assignment_id: UUID,
+    body: ScreeningArbitrationCreate,
+    db: DbSession,
+    user_sub: UUID = Depends(get_current_user_sub),
+) -> ApiResponse[ScreeningAssignmentRead]:
+    ref = await load_assignment_for_member(db, assignment_id, user_sub)
+    await ensure_project_arbitrator(db, ref.project_id, user_sub)
+    try:
+        assignment = await ScreeningReviewService(db).arbitrate(assignment_id, user_sub, body)
+    except AssignmentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=_ASSIGNMENT_NOT_FOUND
+        ) from exc
+    except DecisionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Screening decision not found"
         ) from exc
     await db.commit()
     return ApiResponse.success(assignment, trace_id=getattr(request.state, "trace_id", None))

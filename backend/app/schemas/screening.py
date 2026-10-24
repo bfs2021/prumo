@@ -1,4 +1,4 @@
-"""Title/abstract screening: config, enrollment, queue and decisions. snake_case on the wire."""
+"""Title/abstract screening: config, enrollment, queue, decisions and arbitration. snake_case on the wire."""
 
 from datetime import datetime
 from typing import Literal, Self
@@ -127,6 +127,49 @@ class ScreeningAssignmentRead(BaseModel):
     outcome: ScreeningOutcomeRead | None
     peer_decisions: list[PeerDecisionRead]
     exclusion_reasons: list[str]
+
+
+class ScreeningConflictItem(BaseModel):
+    """One unruled conflict with every reviewer's current decision."""
+
+    assignment_id: UUID
+    article: ScreeningArticle
+    decisions: list[PeerDecisionRead]
+
+
+class ScreeningConflictsRead(BaseModel):
+    """The project's unruled conflicts, and the protocol reasons an override may cite."""
+
+    items: list[ScreeningConflictItem]
+    exclusion_reasons: list[str]
+
+
+class ScreeningArbitrationCreate(BaseModel):
+    """A ruling on the decisions the arbitrator saw: select one of them, or override.
+
+    A new ruling is always a new row; the latest one stands.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ruled_on_decision_ids: list[UUID] = Field(min_length=1, max_length=3)
+    selected_decision_id: UUID | None = None
+    decision: ScreeningDecisionValue | None = None
+    exclusion_reason: str | None = Field(None, max_length=1000)
+    rationale: str | None = Field(None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _select_or_override(self) -> Self:
+        if (self.selected_decision_id is None) == (self.decision is None):
+            raise ValueError("Give exactly one of selected_decision_id or decision")
+        if (
+            self.selected_decision_id is not None
+            and self.selected_decision_id not in self.ruled_on_decision_ids
+        ):
+            raise ValueError("selected_decision_id must be one of ruled_on_decision_ids")
+        if self.exclusion_reason is not None and self.decision != "exclude":
+            raise ValueError("exclusion_reason is only allowed when decision is 'exclude'")
+        return self
 
 
 class ScreeningAssignmentRef(BaseModel):

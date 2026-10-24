@@ -3,7 +3,9 @@
 Every read takes ``project_id`` as a required keyword (an id list only narrows
 it), and every assignment-to-article join goes through
 :data:`ARTICLE_STILL_IN_PROJECT`. The two id-keyed calls, ``get_assignment``
-and ``lock_assignment``, belong to the by-id guard and run behind it.
+and ``lock_assignment``, belong to the by-id guard and run behind it;
+``decisions_in_assignment`` is keyed by a guard-bound assignment and runs only
+behind ``screening_review_service.owned_decisions``.
 """
 
 from __future__ import annotations
@@ -241,6 +243,38 @@ class ScreeningRepository:
             decision=decision,
             exclusion_reason=exclusion_reason,
             rationale=rationale,
+        )
+        self.db.add(row)
+        await self.db.flush()
+        return row
+
+    async def decisions_in_assignment(
+        self, assignment_id: UUID, decision_ids: Sequence[UUID]
+    ) -> list[ScreeningDecision]:
+        """The given decisions that belong to ``assignment_id`` (the scope, in the WHERE clause)."""
+        stmt = select(ScreeningDecision).where(
+            ScreeningDecision.assignment_id == assignment_id,
+            ScreeningDecision.id.in_(decision_ids),
+        )
+        return list((await self.db.execute(stmt)).scalars().all())
+
+    async def add_arbitration(
+        self,
+        assignment_id: UUID,
+        decision: str,
+        exclusion_reason: str | None,
+        selected_decision_id: UUID | None,
+        rationale: str | None,
+        decided_by: UUID,
+    ) -> ScreeningArbitration:
+        """One INSERT: a ruling is never updated, a re-ruling is a new row."""
+        row = ScreeningArbitration(
+            assignment_id=assignment_id,
+            decision=decision,
+            exclusion_reason=exclusion_reason,
+            selected_decision_id=selected_decision_id,
+            rationale=rationale,
+            decided_by=decided_by,
         )
         self.db.add(row)
         await self.db.flush()

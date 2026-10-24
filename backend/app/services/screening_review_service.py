@@ -1,4 +1,4 @@
-"""Blind title/abstract review: the queue, one record, and a reviewer's decision.
+"""Blind title/abstract review: the queue, one record, decisions, conflicts and rulings.
 
 ``assignment_states`` is THE one place that loads and derives assignment state;
 the review, arbitration and PRISMA reads all call it. Another reviewer's
@@ -7,7 +7,10 @@ decision leaves this module only when ``reveals_peers`` allows it.
 Lock order is always project row (``FOR SHARE``) then assignment row
 (``FOR NO KEY UPDATE``): the share lock makes a reviewer-count change wait for
 an in-flight decision, the assignment lock serializes decisions on one record
-so the reviewer cap holds.
+so the reviewer cap holds and a ruling sees the decisions it rules on.
+
+``owned_decisions`` is THE decision-in-assignment guard: a ruling's decision
+ids reach the database only through it.
 """
 
 from __future__ import annotations
@@ -25,9 +28,12 @@ from app.repositories.screening_repository import ScreeningRepository
 from app.schemas.common import ApiErrorCode
 from app.schemas.screening import (
     PeerDecisionRead,
+    ScreeningArbitrationCreate,
     ScreeningArticle,
     ScreeningAssignmentRead,
     ScreeningAssignmentRef,
+    ScreeningConflictItem,
+    ScreeningConflictsRead,
     ScreeningDecisionCreate,
     ScreeningDecisionRead,
     ScreeningOutcomeRead,
@@ -50,6 +56,26 @@ from app.services.screening_outcome import (
 
 class AssignmentNotFoundError(Exception):
     """The assignment is missing, or its article was deleted or moved out of the project."""
+
+
+class DecisionNotFoundError(Exception):
+    """A decision id is missing or belongs to another assignment (one error for both)."""
+
+
+async def owned_decisions(
+    db: AsyncSession, *, assignment_id: UUID, decision_ids: Sequence[UUID]
+) -> list[ScreeningDecision]:
+    """THE decision-in-assignment guard: the decisions, deduplicated, in input order.
+
+    Only when every id belongs to ``assignment_id`` (bound by the caller's
+    guard); a missing and a foreign id raise the same error.
+    """
+    wanted = list(dict.fromkeys(decision_ids))
+    rows = await ScreeningRepository(db).decisions_in_assignment(assignment_id, wanted)
+    by_id = {row.id: row for row in rows}
+    if len(by_id) != len(wanted):
+        raise DecisionNotFoundError("Decision not found")
+    return [by_id[decision_id] for decision_id in wanted]
 
 
 async def get_assignment_ref(db: AsyncSession, assignment_id: UUID) -> ScreeningAssignmentRef:
@@ -141,6 +167,14 @@ def _decision_read(decision: CurrentDecision) -> ScreeningDecisionRead:
     )
 
 
+def _peer_read(decision: CurrentDecision, names: dict[UUID, str | None]) -> PeerDecisionRead:
+    return PeerDecisionRead(
+        **_decision_read(decision).model_dump(),
+        reviewer_id=decision.reviewer_id,
+        reviewer_name=names.get(decision.reviewer_id),
+    )
+
+
 class ScreeningReviewService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
@@ -223,6 +257,94 @@ class ScreeningReviewService:
         )
         return await self._read(ref.project_id, assignment_id, reviewer_id, reviewer_count)
 
+    async def conflicts(self, project_id: UUID, viewer_id: UUID) -> ScreeningConflictsRead:
+        """Unruled conflicts in queue order, each with every reviewer's current decision."""
+        reviewer_count = await self._reviewer_count(project_id)
+        roles = await screening_roles(self.db, project_id, viewer_id)
+        snapshots = await assignment_states(
+            self.db, project_id=project_id, reviewer_count=reviewer_count
+        )
+        in_conflict = {
+            assignment_id: snapshot
+            for assignment_id, snapshot in snapshots.items()
+            if snapshot.state.phase == "conflict"
+            and reveals_peers(snapshot.state, is_arbitrator=roles.can_arbitrate)
+        }
+        items: list[ScreeningConflictItem] = []
+        if in_conflict:
+            articles = await self.screening.assignments_with_articles(
+                project_id=project_id, assignment_ids=list(in_conflict)
+            )
+            names = await profile_names(
+                self.db, {d.reviewer_id for s in in_conflict.values() for d in s.decisions}
+            )
+            items = [
+                ScreeningConflictItem(
+                    assignment_id=assignment_id,
+                    article=ScreeningArticle.model_validate(article, from_attributes=True),
+                    decisions=[_peer_read(d, names) for d in in_conflict[assignment_id].decisions],
+                )
+                for assignment_id, article in articles
+            ]
+        return ScreeningConflictsRead(
+            items=items, exclusion_reasons=await load_exclusion_reasons(self.db, project_id)
+        )
+
+    async def arbitrate(
+        self, assignment_id: UUID, arbitrator_id: UUID, body: ScreeningArbitrationCreate
+    ) -> ScreeningAssignmentRead:
+        """Append a ruling on exactly the current decisions; a re-ruling is a new row."""
+        ref = await get_assignment_ref(self.db, assignment_id)
+        reviewer_count = reviewer_count_of(await self.projects.settings_for_share(ref.project_id))
+        if reviewer_count is None:
+            raise _not_configured()
+        await self.screening.lock_assignment(assignment_id)
+        snapshot = (
+            await assignment_states(
+                self.db,
+                project_id=ref.project_id,
+                reviewer_count=reviewer_count,
+                assignment_ids=[assignment_id],
+            )
+        ).get(assignment_id)
+        if snapshot is None:
+            raise AssignmentNotFoundError
+        ruled_on = await owned_decisions(
+            self.db, assignment_id=assignment_id, decision_ids=body.ruled_on_decision_ids
+        )
+        outcome = snapshot.state.outcome
+        if snapshot.state.phase != "conflict" and (outcome is None or outcome.kind != "arbitrated"):
+            raise ScreeningStateError(
+                ApiErrorCode.SCREENING_NOT_IN_CONFLICT, "This record is not in conflict."
+            )
+        if set(body.ruled_on_decision_ids) != {d.id for d in snapshot.decisions}:
+            raise ScreeningStateError(
+                ApiErrorCode.SCREENING_STALE_DECISIONS,
+                "The decisions changed since you opened this conflict. Reload it.",
+            )
+        if body.selected_decision_id is not None:
+            selected = next(d for d in ruled_on if d.id == body.selected_decision_id)
+            decision, reason = selected.decision, selected.exclusion_reason
+        else:
+            assert body.decision is not None  # the schema requires one of the two
+            decision, reason = body.decision, body.exclusion_reason
+            if reason is not None and reason not in (
+                await load_exclusion_reasons(self.db, ref.project_id)
+            ):
+                raise ScreeningStateError(
+                    ApiErrorCode.SCREENING_UNKNOWN_EXCLUSION_REASON,
+                    "The protocol's exclusion reasons changed. Reload and pick again.",
+                )
+        await self.screening.add_arbitration(
+            assignment_id,
+            decision,
+            reason,
+            body.selected_decision_id,
+            body.rationale,
+            decided_by=arbitrator_id,
+        )
+        return await self.get_assignment(assignment_id, arbitrator_id)
+
     async def _read(
         self, project_id: UUID, assignment_id: UUID, viewer_id: UUID, reviewer_count: int | None
     ) -> ScreeningAssignmentRead:
@@ -272,13 +394,6 @@ class ScreeningReviewService:
                 if outcome is not None
                 else None
             ),
-            peer_decisions=[
-                PeerDecisionRead(
-                    **_decision_read(d).model_dump(),
-                    reviewer_id=d.reviewer_id,
-                    reviewer_name=names.get(d.reviewer_id),
-                )
-                for d in peers
-            ],
+            peer_decisions=[_peer_read(d, names) for d in peers],
             exclusion_reasons=await load_exclusion_reasons(self.db, project_id),
         )

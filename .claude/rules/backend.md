@@ -98,7 +98,8 @@ guard that drifted or was never made.
   in its owner), `llm_connection_service.owned_project_connection` (a
   project-scope connection in its project), `pat_service.owned_token` (a
   personal access token or OAuth connection in its owner; `kind` is part
-  of the predicate). Need a new pair? Add
+  of the predicate), `screening_review_service.owned_decisions` (screening
+  decisions in their assignment). Need a new pair? Add
   ONE guard and import it — never copy a sibling. This list is load-bearing:
   the CI gate matches WHERE-clause shapes, so it cannot see a
   `db.get`-then-compare copy — the enumeration is what prevents copy #3.
