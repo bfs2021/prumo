@@ -25,6 +25,7 @@ from app.api.v1.endpoints import (
     oauth_consent,
     parser_settings,
     personal_access_tokens,
+    prisma,
     project_archive,
     project_connections,
     project_delete,
@@ -46,6 +47,7 @@ api_router = APIRouter()
 api_router.include_router(template_catalogue.router, tags=["template-catalogue"])
 api_router.include_router(pubmed_import.router, tags=["imports"])
 api_router.include_router(screening.router, tags=["screening"])
+api_router.include_router(prisma.router, tags=["prisma"])
 
 api_router.include_router(
     zotero_import.router,
