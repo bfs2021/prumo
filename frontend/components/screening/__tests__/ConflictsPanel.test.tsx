@@ -4,7 +4,7 @@
  * the 409s that mean the list is out of date.
  */
 import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
-import {render, screen, waitFor} from '@testing-library/react';
+import {fireEvent, render, screen, waitFor} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {http, HttpResponse} from 'msw';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
@@ -194,7 +194,7 @@ describe('ConflictsPanel', () => {
     );
   });
 
-  it('posts one ruling while another is in flight', async () => {
+  it('posts one ruling when two choices are clicked back to back', async () => {
     serveConflicts();
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => {
@@ -208,13 +208,14 @@ describe('ConflictsPanel', () => {
         return ok({});
       }),
     );
-    const user = userEvent.setup();
     renderPanel();
 
-    await user.click(await screen.findByRole('button', {name: "Use Ana's decision"}));
-    await waitFor(() => expect(posts).toBe(1));
-    // The first ruling has not settled: a second choice goes nowhere.
-    await user.click(screen.getByRole('button', {name: "Use Bruno's decision"}));
+    const ana = await screen.findByRole('button', {name: "Use Ana's decision"});
+    const bruno = screen.getByRole('button', {name: "Use Bruno's decision"});
+    // Back to back, before React re-renders `isPending` into `disabled`: only
+    // the in-flight flag can stop the second ruling.
+    fireEvent.click(ana);
+    fireEvent.click(bruno);
 
     release();
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
