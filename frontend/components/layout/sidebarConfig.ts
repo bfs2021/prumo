@@ -51,7 +51,7 @@ export const sidebarSections: SidebarSection[] = [
         title: t('layout', 'sectionReview'),
         items: [
             {id: 'articles', label: t('layout', 'navArticles'), icon: FileText, shortcut: 'A'},
-            {id: 'screening', label: t('layout', 'navScreening'), icon: ListChecks, shortcut: 'T', comingSoon: true},
+            {id: 'screening', label: t('layout', 'navScreening'), icon: ListChecks, shortcut: 'T'},
             {id: 'extraction', label: t('layout', 'navDataExtraction'), icon: ClipboardCheck, shortcut: 'E'},
             {id: 'quality', label: t('layout', 'navQualityAssessment'), icon: ShieldCheck, shortcut: 'Q'},
             {id: 'prisma', label: t('layout', 'navPrismaReport'), icon: FileBarChart, shortcut: 'R', comingSoon: true},
