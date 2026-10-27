@@ -10,6 +10,7 @@
  */
 import {supabase} from '@/integrations/supabase/client';
 import {apiClient} from '@/integrations/api/client';
+import {selectAllProjectArticles} from '@/services/articlesService';
 import {toResult, type ErrorResult} from '@/lib/error-utils';
 import type {MemberRole, ProjectListItem} from '@/types/project';
 import type {Article} from '@/types/article';
@@ -101,45 +102,19 @@ const PROJECT_ARTICLES_SELECT = [
 /**
  * Load all articles for a project (list projection — no large text blobs).
  *
- * PostgREST caps a response at the project's max-rows (1,000 on hosted
- * Supabase), so a single read silently truncates and every counter built from
- * the array's length stops there: page with `.range()` until a short page
- * comes back (#1054).
- *
- * `id` tie-breaks the order — one import batch shares one `created_at`
- * (transaction start), so windows over `created_at` alone are not stable.
- * Rows are deduped by id: a concurrent insert shifts later rows down one
- * offset, repeating a row at each page boundary.
+ * Delegates to the shared pager: one loop over `articles` for the worklist,
+ * the QA/extraction dashboards and the HITL table keeps their ordering, cap
+ * handling and boundary dedupe from drifting apart (#1054).
  *
  * NOTE: errors are logged by the caller; no toast.
  */
 export function loadProjectArticles(
   projectId: string,
 ): Promise<ErrorResult<Article[]>> {
-  return toResult(async () => {
-    // The hosted default; a project cap below this would truncate at the cap again.
-    const PAGE_SIZE = 1000;
-    const all: Article[] = [];
-    const seen = new Set<string>();
-    for (let from = 0; ; from += PAGE_SIZE) {
-      const {data, error} = await supabase
-        .from('articles')
-        .select(PROJECT_ARTICLES_SELECT)
-        .eq('project_id', projectId)
-        .order('created_at', {ascending: false})
-        .order('id', {ascending: false})
-        .range(from, from + PAGE_SIZE - 1);
-      if (error) throw error;
-      const page = (data as unknown as Article[]) ?? [];
-      for (const article of page) {
-        if (!seen.has(article.id)) {
-          seen.add(article.id);
-          all.push(article);
-        }
-      }
-      if (page.length < PAGE_SIZE) return all;
-    }
-  }, 'projectsService.loadProjectArticles');
+  return toResult(
+    () => selectAllProjectArticles<Article>(projectId, PROJECT_ARTICLES_SELECT),
+    'projectsService.loadProjectArticles',
+  );
 }
 
 // ---------------------------------------------------------------------------
